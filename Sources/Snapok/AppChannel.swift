@@ -22,6 +22,13 @@ enum AppChannel {
             : HotKey(keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(shiftKey | optionKey), key: "A")
     }
 
+    /// ⌃⌘T for release, ⇧⌥T for development (matching ⌘T, which pins inside the capture overlay).
+    static var defaultPinHotKey: HotKey {
+        isRelease
+            ? HotKey(keyCode: UInt32(kVK_ANSI_T), modifiers: UInt32(controlKey | cmdKey), key: "T")
+            : HotKey(keyCode: UInt32(kVK_ANSI_T), modifiers: UInt32(shiftKey | optionKey), key: "T")
+    }
+
     static var editImageHotKey: HotKey { editImageHotKey(forRelease: isRelease) }
 
     static func editImageHotKey(forRelease release: Bool) -> HotKey {

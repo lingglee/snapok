@@ -67,7 +67,11 @@ struct HotKey: Equatable, Sendable {
     var menuKeyEquivalent: String { key.count == 1 && Self.namedKeys[Int(keyCode)] == nil ? key.lowercased() : "" }
 
     static func saved(in defaults: UserDefaults = .standard, default fallback: HotKey) -> HotKey {
-        guard let stored = defaults.dictionary(forKey: preferenceKey),
+        saved(in: defaults, key: preferenceKey, default: fallback)
+    }
+
+    static func saved(in defaults: UserDefaults = .standard, key preference: String, default fallback: HotKey) -> HotKey {
+        guard let stored = defaults.dictionary(forKey: preference),
               let code = stored["keyCode"] as? Int, let flags = stored["modifiers"] as? Int, let key = stored["key"] as? String,
               case let hotKey = HotKey(keyCode: UInt32(code), modifiers: UInt32(flags), key: key), hotKey.isValidGlobalShortcut
         else { return fallback }
@@ -75,20 +79,67 @@ struct HotKey: Equatable, Sendable {
     }
 
     func save(in defaults: UserDefaults = .standard) {
-        defaults.set(["keyCode": Int(keyCode), "modifiers": Int(modifiers), "key": key], forKey: Self.preferenceKey)
+        save(in: defaults, key: Self.preferenceKey)
+    }
+
+    func save(in defaults: UserDefaults = .standard, key preference: String) {
+        defaults.set(["keyCode": Int(keyCode), "modifiers": Int(modifiers), "key": key], forKey: preference)
     }
 }
 
-/// Owns the Carbon registration of the capture shortcut so it can be changed while the app runs.
+/// The global shortcuts Snapok registers. Each has its own Carbon id and preference.
+enum HotKeyAction: UInt32, CaseIterable, Sendable {
+    /// Starts a new screenshot.
+    case capture = 1
+    /// Pins the most recent finished screenshot (or the clipboard image) to the screen.
+    case pin = 2
+
+    var preferenceKey: String {
+        switch self {
+        case .capture: return HotKey.preferenceKey
+        case .pin: return "app.pinHotKey"
+        }
+    }
+
+    @MainActor var defaultHotKey: HotKey {
+        switch self {
+        case .capture: return AppChannel.defaultHotKey
+        case .pin: return AppChannel.defaultPinHotKey
+        }
+    }
+}
+
+/// Owns the Carbon registration of the global shortcuts so they can be changed while the app runs.
 @MainActor
 final class HotKeyCenter {
     static let shared = HotKeyCenter()
     static let didChange = Notification.Name("HotKeyCenter.didChange")
     private static let signature = OSType(0x534E4150)
 
-    private(set) var current = HotKey.saved(default: AppChannel.defaultHotKey)
-    var onPress: (() -> Void)?
-    private var ref: EventHotKeyRef?
+    private var hotKeys: [HotKeyAction: HotKey] = Dictionary(uniqueKeysWithValues: HotKeyAction.allCases.map {
+        ($0, HotKey.saved(key: $0.preferenceKey, default: $0.defaultHotKey))
+    })
+    private var refs: [HotKeyAction: EventHotKeyRef] = [:]
+    private var handlers: [HotKeyAction: () -> Void] = [:]
+
+    /// The screenshot shortcut.
+    var current: HotKey { hotKey(for: .capture) }
+    /// The pin-to-screen shortcut.
+    var pinHotKey: HotKey { hotKey(for: .pin) }
+
+    var onPress: (() -> Void)? {
+        get { handlers[.capture] }
+        set { handlers[.capture] = newValue }
+    }
+
+    var onPinPress: (() -> Void)? {
+        get { handlers[.pin] }
+        set { handlers[.pin] = newValue }
+    }
+
+    func hotKey(for action: HotKeyAction) -> HotKey {
+        hotKeys[action] ?? action.defaultHotKey
+    }
 
     func start() {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -96,47 +147,57 @@ final class HotKeyCenter {
             var hotKeyID = EventHotKeyID()
             GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
                               nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID)
-            guard hotKeyID.signature == HotKeyCenter.signature, hotKeyID.id == 1 else { return noErr }
-            log("hotkey pressed")
-            Task { @MainActor in HotKeyCenter.shared.onPress?() }
+            guard hotKeyID.signature == HotKeyCenter.signature, let action = HotKeyAction(rawValue: hotKeyID.id) else { return noErr }
+            log("hotkey pressed: \(action)")
+            Task { @MainActor in HotKeyCenter.shared.handlers[action]?() }
             return noErr
         }, 1, &eventType, nil, nil)
-        register(current)
+        HotKeyAction.allCases.forEach { register($0) }
     }
 
-    /// Switches to a new shortcut; keeps the old one and returns false when macOS refuses it.
-    func change(to hotKey: HotKey) -> Bool {
-        guard register(hotKey) else {
-            register(current)
-            return false
+    /// Switches the screenshot shortcut; keeps the old one and returns false when macOS refuses it.
+    func change(to hotKey: HotKey) -> Bool { change(.capture, to: hotKey) == .changed }
+
+    enum ChangeResult { case changed, conflict, refused }
+
+    /// Switches one shortcut. Two actions may not share a key; macOS may refuse keys owned by other apps.
+    func change(_ action: HotKeyAction, to hotKey: HotKey) -> ChangeResult {
+        if HotKeyAction.allCases.contains(where: { $0 != action && self.hotKey(for: $0) == hotKey }) { return .conflict }
+        let previous = self.hotKey(for: action)
+        hotKeys[action] = hotKey
+        guard register(action) else {
+            hotKeys[action] = previous
+            register(action)
+            return .refused
         }
-        current = hotKey
-        hotKey.save()
+        hotKey.save(key: action.preferenceKey)
         NotificationCenter.default.post(name: Self.didChange, object: nil)
-        return true
+        return .changed
     }
 
-    /// Releases the shortcut while the user records a new one, so pressing it does not start a capture.
-    func suspend() { unregister() }
+    /// Releases the shortcuts while the user records a new one, so pressing one does not trigger it.
+    func suspend() { HotKeyAction.allCases.forEach { unregister($0) } }
 
     func resume() {
-        if ref == nil { register(current) }
+        for action in HotKeyAction.allCases where refs[action] == nil { register(action) }
     }
 
-    func stop() { unregister() }
+    func stop() { suspend() }
 
     @discardableResult
-    private func register(_ hotKey: HotKey) -> Bool {
-        unregister()
-        let status = RegisterEventHotKey(hotKey.keyCode, hotKey.modifiers, EventHotKeyID(signature: Self.signature, id: 1),
+    private func register(_ action: HotKeyAction) -> Bool {
+        unregister(action)
+        let hotKey = self.hotKey(for: action)
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(hotKey.keyCode, hotKey.modifiers, EventHotKeyID(signature: Self.signature, id: action.rawValue),
                                          GetApplicationEventTarget(), 0, &ref)
-        log(status == noErr ? "hotkey registered: \(hotKey.description)" : "failed to register hotkey \(hotKey.description), status=\(status)")
-        if status != noErr { ref = nil }
+        log(status == noErr ? "hotkey registered (\(action)): \(hotKey.description)" : "failed to register hotkey (\(action)) \(hotKey.description), status=\(status)")
+        if status == noErr, let ref { refs[action] = ref }
         return status == noErr
     }
 
-    private func unregister() {
-        if let ref { UnregisterEventHotKey(ref) }
-        ref = nil
+    private func unregister(_ action: HotKeyAction) {
+        if let ref = refs[action] { UnregisterEventHotKey(ref) }
+        refs[action] = nil
     }
 }
