@@ -44,6 +44,7 @@ struct BackgroundLayout {
     var shadow = true
     var borderWidth: CGFloat = 0
     var borderColor: NSColor = .white
+    var watermark: BackgroundWatermark?
 
     func canvasSize(for source: CGSize) -> CGSize {
         CGSize(width: source.width + horizontalPadding * 2, height: source.height + verticalPadding * 2)
@@ -94,6 +95,7 @@ enum BackgroundRenderer {
             layout.borderColor.setStroke()
             border.stroke()
         }
+        layout.watermark?.draw(in: canvas, photo: photo)
         NSGraphicsContext.restoreGraphicsState()
     }
 
@@ -110,5 +112,126 @@ enum BackgroundRenderer {
         NSGraphicsContext.restoreGraphicsState()
         guard let output = context.makeImage() else { return nil }
         return NSImage(cgImage: output, size: size)
+    }
+}
+
+/// Text stamped on the finished canvas. Sizes are in canvas (source) pixels, so the
+/// zoomed preview and the full-resolution export always match.
+@MainActor
+struct BackgroundWatermark {
+    enum Position: Int, CaseIterable {
+        case topLeft, top, topRight, left, center, right, bottomLeft, bottom, bottomRight, tiled
+    }
+
+    var text: String
+    var fontFamily: String?
+    var bold = false
+    var fontSize: CGFloat = 32
+    var color: NSColor = .white
+    var opacity: CGFloat = 0.6
+    var position: Position = .bottomRight
+
+    /// nil when the watermark is off or has nothing to draw.
+    init?(preferences: BackgroundPreferences.Watermark?) {
+        guard let value = preferences?.normalized(), value.isVisible else { return nil }
+        text = value.text
+        fontFamily = value.fontFamily
+        bold = value.bold
+        fontSize = CGFloat(value.fontSize)
+        color = NSColor(srgbRed: value.color[0], green: value.color[1], blue: value.color[2], alpha: value.color[3])
+        opacity = CGFloat(value.opacity)
+        position = Position(rawValue: value.position) ?? .bottomRight
+    }
+
+    init(text: String, fontFamily: String? = nil, bold: Bool = false, fontSize: CGFloat = 32,
+         color: NSColor = .white, opacity: CGFloat = 0.6, position: Position = .bottomRight) {
+        self.text = text
+        self.fontFamily = fontFamily
+        self.bold = bold
+        self.fontSize = fontSize
+        self.color = color
+        self.opacity = opacity
+        self.position = position
+    }
+
+    static func font(family: String?, bold: Bool, size: CGFloat) -> NSFont {
+        if let family, !family.isEmpty,
+           let font = NSFontManager.shared.font(withFamily: family, traits: bold ? .boldFontMask : [], weight: bold ? 9 : 5, size: size) {
+            return font
+        }
+        return .systemFont(ofSize: size, weight: bold ? .bold : .medium)
+    }
+
+    var attributes: [NSAttributedString.Key: Any] {
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.25)
+        shadow.shadowBlurRadius = max(fontSize / 12, 1)
+        shadow.shadowOffset = CGSize(width: 0, height: -max(fontSize / 24, 0.5))
+        return [.font: Self.font(family: fontFamily, bold: bold, size: fontSize),
+                .foregroundColor: color.withAlphaComponent(color.alphaComponent * opacity),
+                .shadow: shadow]
+    }
+
+    /// Where the text box lands. Edge positions sit centred in the padding band when it is
+    /// tall enough, otherwise inset from the canvas edge.
+    func frame(textSize: CGSize, canvas: CGRect, photo: CGRect) -> CGRect {
+        let margin = max(fontSize * 0.6, 8)
+        let column = position.rawValue % 3, row = position.rawValue / 3
+        let x: CGFloat
+        switch column {
+        case 0: x = canvas.minX + margin
+        case 2: x = canvas.maxX - margin - textSize.width
+        default: x = canvas.midX - textSize.width / 2
+        }
+        let topBand = canvas.maxY - photo.maxY, bottomBand = photo.minY - canvas.minY
+        let y: CGFloat
+        switch row {
+        case 0:
+            y = topBand >= textSize.height + 8 ? photo.maxY + (topBand - textSize.height) / 2 : canvas.maxY - margin - textSize.height
+        case 2:
+            y = bottomBand >= textSize.height + 8 ? canvas.minY + (bottomBand - textSize.height) / 2 : canvas.minY + margin
+        default: y = canvas.midY - textSize.height / 2
+        }
+        return CGRect(origin: CGPoint(x: x, y: y), size: textSize)
+    }
+
+    func draw(in canvas: CGRect, photo: CGRect) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, opacity > 0, fontSize > 0 else { return }
+        let string = NSAttributedString(string: trimmed, attributes: attributes)
+        let size = string.size()
+        guard size.width > 0, size.height > 0 else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: canvas).addClip()
+        if position == .tiled {
+            drawTiled(string, size: size, canvas: canvas)
+        } else {
+            string.draw(at: frame(textSize: size, canvas: canvas, photo: photo).origin)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func drawTiled(_ string: NSAttributedString, size: CGSize, canvas: CGRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        let stepX = size.width + max(fontSize * 3, 40), stepY = size.height + max(fontSize * 3, 40)
+        let diagonal = hypot(canvas.width, canvas.height)
+        // Cap the work for tiny fonts on huge canvases.
+        guard (diagonal / stepX) * (diagonal / stepY) < 20_000 else { return }
+        context.saveGState()
+        context.translateBy(x: canvas.midX, y: canvas.midY)
+        context.rotate(by: .pi / 6)
+        var row = 0
+        var y = -diagonal / 2
+        while y < diagonal / 2 {
+            // Stagger alternate rows for an even pattern.
+            var x = -diagonal / 2 - (row.isMultiple(of: 2) ? 0 : stepX / 2)
+            while x < diagonal / 2 {
+                string.draw(at: CGPoint(x: x, y: y))
+                x += stepX
+            }
+            y += stepY
+            row += 1
+        }
+        context.restoreGState()
     }
 }

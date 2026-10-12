@@ -73,7 +73,8 @@ struct BackgroundRendererTests {
             try previewBitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments[1]))
         }
         try checkPreferences()
-        print("Passed background checks: dimensions/orientation, zero padding, rounded corners, border pixels, custom image fill, export limits, preference restoration")
+        checkWatermark(source: source)
+        print("Passed background checks: dimensions/orientation, zero padding, rounded corners, border pixels, custom image fill, export limits, preference restoration, watermark")
     }
 
     static func checkPreferences() throws {
@@ -93,8 +94,17 @@ struct BackgroundRendererTests {
         saved.backgroundColor = [0.1, 0.4, 0.5, 1]
         saved.customImagePath = "/tmp/background.tiff"
         saved.customGradient = .init(start: [0.2, 0.4, 0.6, 1], end: [0.9, 0.8, 0.7, 1], angle: 135)
+        saved.watermark = .init(enabled: true, text: "© Snapok", fontFamily: "Helvetica", bold: true,
+                                fontSize: 48, color: [0.1, 0.2, 0.3, 1], opacity: 0.5, position: 9)
         saved.save(in: defaults)
         precondition(BackgroundPreferences.load(in: UserDefaults(suiteName: suite)!) == saved)
+        saved.watermark?.fontSize = 2
+        saved.watermark?.position = -3
+        saved.watermark?.color = [1]
+        saved.save(in: defaults)
+        let clampedMark = BackgroundPreferences.load(in: defaults).watermark!
+        precondition(clampedMark.fontSize == 8 && clampedMark.position == 0 && clampedMark.color == [1, 1, 1, 1])
+        saved.watermark = nil
         saved.horizontalPadding = -10
         saved.gradient = 99
         saved.borderWidth = 200
@@ -109,6 +119,48 @@ struct BackgroundRendererTests {
         precondition(BackgroundPreferences.load(in: defaults).customGradient == nil, "Existing settings must decode without a custom gradient")
         defaults.set(Data("invalid".utf8), forKey: BackgroundPreferences.key)
         precondition(BackgroundPreferences.load(in: defaults) == BackgroundPreferences())
+    }
+
+    static func checkWatermark(source: CGImage) {
+        func pixels(_ watermark: BackgroundWatermark?) -> NSBitmapImageRep {
+            let layout = BackgroundLayout(horizontalPadding: 80, verticalPadding: 80, cornerRadius: 0, shadow: false, watermark: watermark)
+            let image = BackgroundRenderer.render(source: source, background: .color(.green), layout: layout)!
+            return NSBitmapImageRep(cgImage: image.cgImage(forProposedRect: nil, context: nil, hints: nil)!)
+        }
+        func whitePixels(_ bitmap: NSBitmapImageRep, in rect: CGRect) -> Int {
+            var count = 0
+            for x in Int(rect.minX)..<Int(rect.maxX) { for y in Int(rect.minY)..<Int(rect.maxY) {
+                let c = bitmap.colorAt(x: x, y: y)!
+                if c.redComponent > 0.8 && c.greenComponent > 0.8 && c.blueComponent > 0.8 { count += 1 }
+            } }
+            return count
+        }
+        // Canvas 760 × 520; bitmap rows are top-down. Bottom-right sits in the bottom padding band.
+        let mark = BackgroundWatermark(text: "WATERMARK", fontSize: 30, color: .white, opacity: 1, position: .bottomRight)
+        let marked = pixels(mark)
+        let bottomRight = CGRect(x: 460, y: 440, width: 300, height: 80)
+        let topLeft = CGRect(x: 0, y: 0, width: 300, height: 80)
+        precondition(whitePixels(marked, in: bottomRight) > 50, "Bottom-right watermark must be drawn in the bottom-right padding")
+        precondition(whitePixels(marked, in: topLeft) == 0, "Watermark must not appear elsewhere")
+        precondition(whitePixels(pixels(nil), in: bottomRight) == 0)
+        var top = mark; top.position = .topLeft
+        precondition(whitePixels(pixels(top), in: topLeft) > 50 && whitePixels(pixels(top), in: bottomRight) == 0)
+        var tiled = mark; tiled.position = .tiled
+        let tiledBitmap = pixels(tiled)
+        precondition(whitePixels(tiledBitmap, in: CGRect(x: 0, y: 0, width: 380, height: 260)) > 50 &&
+                     whitePixels(tiledBitmap, in: CGRect(x: 380, y: 260, width: 380, height: 260)) > 50, "Tiled watermark must cover the canvas")
+        var faint = mark; faint.opacity = 0
+        precondition(whitePixels(pixels(faint), in: bottomRight) == 0, "Zero opacity draws nothing")
+        // Fonts: a named family resolves, unknown names fall back to the system font.
+        precondition(BackgroundWatermark.font(family: "Helvetica", bold: true, size: 20).familyName == "Helvetica")
+        precondition(BackgroundWatermark.font(family: "No Such Font 123", bold: false, size: 20).pointSize == 20)
+        // Preferences gate visibility and clamp values.
+        precondition(BackgroundWatermark(preferences: nil) == nil)
+        precondition(BackgroundWatermark(preferences: .init(enabled: false, text: "x")) == nil)
+        precondition(BackgroundWatermark(preferences: .init(enabled: true, text: "   ")) == nil)
+        let restored = BackgroundWatermark(preferences: .init(enabled: true, text: "© Sam", fontFamily: "Helvetica", bold: true,
+                                                               fontSize: 9999, color: [2, 0, 0, 1], opacity: 5, position: 42))!
+        precondition(restored.fontSize == 400 && restored.opacity == 1 && restored.position == .tiled && restored.bold)
     }
 
     static func expect(_ bitmap: NSBitmapImageRep, _ x: Int, _ y: Int, _ expected: NSColor) {

@@ -70,6 +70,19 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     private var selectedBackground = 0
     private var usesCustomGradient = false
     private var selectedGradient = 0
+    private let watermarkEnabled = NSButton(checkboxWithTitle: L("Add watermark", "添加水印"), target: nil, action: nil)
+    private let watermarkText = NSTextField(string: "")
+    private let watermarkPosition = NSPopUpButton()
+    private let watermarkFont = NSPopUpButton()
+    private let watermarkBold = NSButton(checkboxWithTitle: L("Bold", "粗体"), target: nil, action: nil)
+    private let watermarkSize = NSSlider(value: 32, minValue: Double(BackgroundPreferences.Watermark.fontSizeRange.lowerBound),
+                                         maxValue: 200, target: nil, action: nil)
+    private let watermarkSizeField = NSTextField(string: "32")
+    private let watermarkColor = NSColorWell()
+    private let watermarkOpacity = NSSlider(value: 60, minValue: 0, maxValue: 100, target: nil, action: nil)
+    private let watermarkOpacityLabel = NSTextField(labelWithString: "60%")
+    private let watermarkDetails = NSStackView()
+    private let fontFamilies = NSFontManager.shared.availableFontFamilies.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
 
     init(image: NSImage, screen: NSScreen?, annotations: [Annotation] = [], style: BackgroundPreferences? = nil) {
         if let style { preferences = style }
@@ -83,7 +96,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         window.minSize = CGSize(width: 880, height: 640)
         window.isReleasedWhenClosed = false
         super.init(window: window)
-        [annotationColor, colorWell, borderColorWell, gradientStart, gradientEnd].forEach { $0.useCompactSwatch() }
+        [annotationColor, colorWell, borderColorWell, gradientStart, gradientEnd, watermarkColor].forEach { $0.useCompactSwatch() }
         window.delegate = self
         buildInterface()
         restorePreferences()
@@ -257,6 +270,9 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         shadowButton.target = self
         shadowButton.action = #selector(updateComposition)
         add(shadowButton)
+        controls.setCustomSpacing(24, after: shadowButton)
+        add(label(L("Watermark", "水印"), size: 14, weight: .semibold))
+        add(makeWatermarkControls())
         dimensions.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         dimensions.textColor = .secondaryLabelColor
         add(dimensions)
@@ -264,6 +280,165 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         feedback.textColor = .secondaryLabelColor
         add(feedback)
         controls.setCustomSpacing(24, after: colorRow)
+    }
+
+    // MARK: Watermark
+
+    private static let watermarkPositionTitles = [
+        L("Top left", "左上"), L("Top", "顶部居中"), L("Top right", "右上"),
+        L("Left", "左侧居中"), L("Center", "正中"), L("Right", "右侧居中"),
+        L("Bottom left", "左下"), L("Bottom", "底部居中"), L("Bottom right", "右下"),
+        L("Tiled", "平铺满图")
+    ]
+
+    private func makeWatermarkControls() -> NSView {
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 10
+        watermarkEnabled.target = self
+        watermarkEnabled.action = #selector(changeWatermark)
+        container.addArrangedSubview(watermarkEnabled)
+
+        watermarkDetails.orientation = .vertical
+        watermarkDetails.alignment = .leading
+        watermarkDetails.spacing = 10
+        func row(_ title: String, _ views: [NSView]) -> NSStackView {
+            let caption = label(title, size: 12)
+            caption.widthAnchor.constraint(equalToConstant: 44).isActive = true
+            let row = NSStackView(views: [caption] + views)
+            row.spacing = 8
+            watermarkDetails.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: watermarkDetails.widthAnchor).isActive = true
+            return row
+        }
+        watermarkText.placeholderString = L("e.g. © Your Name", "例如：© 你的名字")
+        watermarkText.delegate = self
+        watermarkText.target = self
+        watermarkText.action = #selector(changeWatermark)
+        watermarkText.setAccessibilityLabel(L("Watermark text", "水印文字"))
+        _ = row(L("Text", "文字"), [watermarkText])
+
+        watermarkPosition.addItems(withTitles: Self.watermarkPositionTitles)
+        watermarkPosition.target = self
+        watermarkPosition.action = #selector(changeWatermark)
+        watermarkPosition.setAccessibilityLabel(L("Watermark position", "水印位置"))
+        _ = row(L("Position", "位置"), [watermarkPosition])
+
+        watermarkFont.addItem(withTitle: L("System Font", "系统字体"))
+        watermarkFont.menu?.addItem(.separator())
+        for family in fontFamilies {
+            watermarkFont.addItem(withTitle: family)
+            if let font = NSFont(name: family, size: 13) ?? NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: 13) {
+                watermarkFont.lastItem?.attributedTitle = NSAttributedString(string: family, attributes: [.font: font])
+            }
+        }
+        watermarkFont.target = self
+        watermarkFont.action = #selector(changeWatermark)
+        watermarkFont.setAccessibilityLabel(L("Watermark font", "水印字体"))
+        _ = row(L("Font", "字体"), [watermarkFont])
+
+        watermarkSize.target = self
+        watermarkSize.action = #selector(changeWatermarkSize)
+        watermarkSize.isContinuous = true
+        watermarkSize.setAccessibilityLabel(L("Watermark size (pixels)", "水印字号（像素）"))
+        watermarkSizeField.alignment = .right
+        watermarkSizeField.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        watermarkSizeField.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        watermarkSizeField.target = self
+        watermarkSizeField.action = #selector(changeWatermarkSizeField)
+        watermarkSizeField.delegate = self
+        watermarkSizeField.setAccessibilityLabel(L("Watermark size (pixels)", "水印字号（像素）"))
+        _ = row(L("Size", "字号"), [watermarkSize, watermarkSizeField, label("px", size: 11)])
+
+        watermarkBold.target = self
+        watermarkBold.action = #selector(changeWatermark)
+        watermarkColor.target = self
+        watermarkColor.action = #selector(changeWatermark)
+        watermarkColor.setAccessibilityLabel(L("Watermark color", "水印颜色"))
+        _ = row(L("Color", "颜色"), [watermarkColor, watermarkBold])
+
+        watermarkOpacity.target = self
+        watermarkOpacity.action = #selector(changeWatermark)
+        watermarkOpacity.isContinuous = true
+        watermarkOpacity.setAccessibilityLabel(L("Watermark opacity", "水印不透明度"))
+        watermarkOpacityLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        watermarkOpacityLabel.widthAnchor.constraint(equalToConstant: 38).isActive = true
+        _ = row(L("Opacity", "透明度"), [watermarkOpacity, watermarkOpacityLabel])
+
+        let hint = NSTextField(wrappingLabelWithString: L("Saved as your default and added automatically to future exports.",
+                                                          "会记住设置，之后导出的图片都会自动加上。"))
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+        watermarkDetails.addArrangedSubview(hint)
+        hint.widthAnchor.constraint(equalTo: watermarkDetails.widthAnchor).isActive = true
+
+        container.addArrangedSubview(watermarkDetails)
+        watermarkDetails.widthAnchor.constraint(equalTo: container.widthAnchor).isActive = true
+        return container
+    }
+
+    private var watermarkSettings: BackgroundPreferences.Watermark {
+        let fontIndex = watermarkFont.indexOfSelectedItem
+        return BackgroundPreferences.Watermark(
+            enabled: watermarkEnabled.state == .on,
+            text: watermarkText.stringValue,
+            fontFamily: fontIndex >= 2 ? fontFamilies[fontIndex - 2] : nil,
+            bold: watermarkBold.state == .on,
+            fontSize: watermarkSize.integerValue,
+            color: Self.components(watermarkColor.color),
+            opacity: watermarkOpacity.doubleValue / 100,
+            position: max(watermarkPosition.indexOfSelectedItem, 0)
+        ).normalized()
+    }
+
+    private func restoreWatermark() {
+        let value = (preferences.watermark ?? .init()).normalized()
+        watermarkEnabled.state = value.enabled ? .on : .off
+        watermarkText.stringValue = value.text
+        watermarkPosition.selectItem(at: value.position)
+        if let family = value.fontFamily, let index = fontFamilies.firstIndex(of: family) {
+            watermarkFont.selectItem(at: index + 2)
+        } else { watermarkFont.selectItem(at: 0) }
+        watermarkBold.state = value.bold ? .on : .off
+        watermarkSize.maxValue = max(watermarkSize.maxValue, Double(value.fontSize))
+        watermarkSize.integerValue = value.fontSize
+        watermarkSizeField.integerValue = value.fontSize
+        watermarkColor.color = Self.color(value.color)
+        watermarkOpacity.doubleValue = (value.opacity * 100).rounded()
+        syncWatermarkControls()
+    }
+
+    private func syncWatermarkControls() {
+        watermarkDetails.isHidden = watermarkEnabled.state != .on
+        watermarkOpacityLabel.stringValue = "\(watermarkOpacity.integerValue)%"
+    }
+
+    @objc private func changeWatermark() {
+        watermarkOpacity.doubleValue = watermarkOpacity.doubleValue.rounded()
+        syncWatermarkControls()
+        updateComposition()
+    }
+
+    @objc private func changeWatermarkSize() {
+        watermarkSize.doubleValue = watermarkSize.doubleValue.rounded()
+        watermarkSizeField.integerValue = watermarkSize.integerValue
+        changeWatermark()
+    }
+
+    @objc private func changeWatermarkSizeField() {
+        let range = BackgroundPreferences.Watermark.fontSizeRange
+        let entered = Double(watermarkSizeField.stringValue) ?? watermarkSize.doubleValue
+        let size = entered.isFinite ? min(max(Int(entered.rounded()), range.lowerBound), range.upperBound) : watermarkSize.integerValue
+        // Typed sizes may exceed the slider's comfortable range.
+        watermarkSize.maxValue = max(200, Double(size))
+        watermarkSize.integerValue = size
+        watermarkSizeField.integerValue = size
+        changeWatermark()
+    }
+
+    func controlTextDidChange(_ obj: Notification) {
+        if (obj.object as? NSTextField) === watermarkText { changeWatermark() }
     }
 
     private func makeQuickToolbar() -> NSView {
@@ -447,13 +622,15 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
 
     func controlTextDidEndEditing(_ obj: Notification) {
         if let field = obj.object as? NSTextField, values.contains(field) { valueChanged(field) }
+        if (obj.object as? NSTextField) === watermarkSizeField { changeWatermarkSizeField() }
     }
 
     @objc private func updateComposition() {
         preview.composition = BackgroundLayout(horizontalPadding: CGFloat(sliders[0].integerValue),
                                                verticalPadding: CGFloat(sliders[1].integerValue),
                                                cornerRadius: CGFloat(sliders[3].integerValue), shadow: shadowButton.state == .on,
-                                               borderWidth: CGFloat(sliders[2].integerValue), borderColor: borderColorWell.color)
+                                               borderWidth: CGFloat(sliders[2].integerValue), borderColor: borderColorWell.color,
+                                               watermark: BackgroundWatermark(preferences: watermarkSettings))
         savePreferences()
         refresh()
     }
@@ -591,6 +768,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
             values[index].integerValue = value
         }
         shadowButton.state = preferences.shadow ? .on : .off
+        restoreWatermark()
         backgroundPicker.selectItem(at: selectedBackground == 4 ? 0 : selectedBackground)
         switch selectedBackground {
         case 1: preview.background = .image(wallpaper!)
@@ -615,6 +793,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         preferences.shadow = shadowButton.state == .on
         preferences.backgroundColor = Self.components(colorWell.color)
         preferences.borderColor = Self.components(borderColorWell.color)
+        preferences.watermark = watermarkSettings
         preferences.save()
     }
 

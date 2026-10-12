@@ -40,7 +40,8 @@ struct CaptureStyle {
         BackgroundLayout(horizontalPadding: CGFloat(preferences.horizontalPadding),
                          verticalPadding: CGFloat(preferences.verticalPadding),
                          cornerRadius: CGFloat(preferences.cornerRadius), shadow: preferences.shadow,
-                         borderWidth: CGFloat(preferences.borderWidth), borderColor: Self.color(preferences.borderColor))
+                         borderWidth: CGFloat(preferences.borderWidth), borderColor: Self.color(preferences.borderColor),
+                         watermark: BackgroundWatermark(preferences: preferences.watermark))
     }
 
     func render(_ image: NSImage) -> NSImage? {
