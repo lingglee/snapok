@@ -12,7 +12,8 @@ final class PixelNumberControl: NSView, NSTextFieldDelegate {
     let input: NSTextField = PixelNumberField()
     private let minus = NSButton(image: NSImage(systemSymbolName: "minus", accessibilityDescription: nil)!, target: nil, action: nil)
     private let plus = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: nil)!, target: nil, action: nil)
-    private let unit = NSTextField(labelWithString: "px")
+    private let unit: NSTextField
+    private let unitText: String
     let range: ClosedRange<Int>
     private(set) var value: Int
     var onChange: ((Int) -> Void)?
@@ -21,13 +22,15 @@ final class PixelNumberControl: NSView, NSTextFieldDelegate {
     private(set) var validationMessage: String?
     private var validationPopover: NSPopover?
     private var inputHint: String {
-        L("Enter \(range.lowerBound)–\(range.upperBound) px; press Enter or leave the field to apply. Scroll to adjust immediately.",
-          "输入 \(range.lowerBound)–\(range.upperBound) px，按 Enter 或移开焦点应用；滚轮调整即时生效。")
+        L("Enter \(range.lowerBound)–\(range.upperBound) \(unitText); press Enter or leave the field to apply. Scroll to adjust immediately.",
+          "输入 \(range.lowerBound)–\(range.upperBound) \(unitText)，按 Enter 或移开焦点应用；滚轮调整即时生效。")
     }
     var isEditing: Bool { input.currentEditor() != nil }
 
-    init(value: Int, range: ClosedRange<Int>, label: String) {
+    init(value: Int, range: ClosedRange<Int>, label: String, unit unitText: String = "px") {
         self.range = range
+        self.unitText = unitText
+        self.unit = NSTextField(labelWithString: unitText)
         self.value = min(range.upperBound, max(range.lowerBound, value))
         super.init(frame: .zero)
         input.alignment = .center
@@ -108,16 +111,16 @@ final class PixelNumberControl: NSView, NSTextFieldDelegate {
     func commitInput() {
         guard let number = Int(input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) else {
             input.integerValue = value
-            showValidation(L("Enter a whole number from \(range.lowerBound) to \(range.upperBound) px. Kept \(value) px.",
-                             "请输入 \(range.lowerBound)–\(range.upperBound) px 范围内的整数，已保留 \(value) px。"))
+            showValidation(L("Enter a whole number from \(range.lowerBound) to \(range.upperBound) \(unitText). Kept \(value) \(unitText).",
+                             "请输入 \(range.lowerBound)–\(range.upperBound) \(unitText) 范围内的整数，已保留 \(value) \(unitText)。"))
             return
         }
         if range.contains(number), number != value { clearValidation() }
         publish(number)
         input.integerValue = value
         if !range.contains(number) {
-            showValidation(L("The range is \(range.lowerBound)–\(range.upperBound) px. Adjusted to \(value) px.",
-                             "允许范围为 \(range.lowerBound)–\(range.upperBound) px，已调整为 \(value) px。"))
+            showValidation(L("The range is \(range.lowerBound)–\(range.upperBound) \(unitText). Adjusted to \(value) \(unitText).",
+                             "允许范围为 \(range.lowerBound)–\(range.upperBound) \(unitText)，已调整为 \(value) \(unitText)。"))
         }
     }
     func controlTextDidChange(_ obj: Notification) { clearValidation() }

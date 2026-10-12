@@ -132,9 +132,10 @@ final class GeneralSettingsPane: PageView {
     private let retention = NSPopUpButton()
     private let language = NSPopUpButton()
     private let theme = NSPopUpButton()
-    private let captureColor = NSColorWell()
+    private let captureColor = ClearableColorWell()
     private let captureBorder = NSPopUpButton()
     private let captureWidth = PixelNumberControl(value: 2, range: CaptureAppearance.borderWidthRange, label: L("Screenshot selection thickness", "截图选框粗细"))
+    private let captureOpacity = PixelNumberControl(value: 100, range: 0...100, label: L("Screenshot selection opacity", "截图选框不透明度"), unit: "%")
     private let capturePreview = CaptureAppearancePreview()
     private let libraryLocation = NSTextField(labelWithString: "")
     private let restoreLibraryLocation = NSButton(title: L("Restore Default", "恢复默认"), target: nil, action: nil)
@@ -153,9 +154,10 @@ final class GeneralSettingsPane: PageView {
         theme.action = #selector(saveTheme)
         theme.setAccessibilityLabel(L("Theme", "主题"))
         captureColor.useCompactSwatch()
-        captureColor.supportsAlpha = false
+        captureColor.supportsAlpha = true
         captureColor.target = self
-        captureColor.action = #selector(saveCaptureAppearance)
+        captureColor.action = #selector(captureColorChanged)
+        NSColorPanel.shared.showsAlpha = true
         captureColor.setAccessibilityLabel(L("Screenshot selection color", "截图选框颜色"))
         captureBorder.addItems(withTitles: CaptureBorderStyle.allCases.map(\.title))
         captureBorder.target = self
@@ -164,10 +166,12 @@ final class GeneralSettingsPane: PageView {
         captureWidth.onChange = { [weak self] _ in self?.saveCaptureAppearance() }
         captureWidth.setAccessibilityLabel(L("Screenshot selection thickness", "截图选框粗细"))
         captureWidth.toolTip = L("Border thickness", "边框粗细")
+        captureOpacity.onChange = { [weak self] _ in self?.saveCaptureAppearance() }
+        captureOpacity.toolTip = L("Opacity: 0% is fully transparent", "不透明度：0% 为完全透明")
         capturePreview.setAccessibilityLabel(L("Screenshot selection preview", "截图选框预览"))
         let captureReset = NSButton(title: L("Restore Default", "恢复默认"), target: self, action: #selector(resetCaptureAppearance))
         captureReset.bezelStyle = .rounded
-        let captureAppearanceRow = NSStackView(views: [captureColor, captureBorder, captureWidth, capturePreview, captureReset])
+        let captureAppearanceRow = NSStackView(views: [captureColor, captureOpacity, captureBorder, captureWidth, capturePreview, captureReset])
         captureAppearanceRow.spacing = 10
         language.addItems(withTitles: ["English", "简体中文"])
         language.selectItem(at: AppLanguage.allCases.firstIndex(of: AppLanguage.saved()) ?? 0)
@@ -303,15 +307,31 @@ final class GeneralSettingsPane: PageView {
     private func loadCaptureAppearance() {
         let appearance = CaptureAppearance.load()
         captureColor.color = appearance.nsColor
+        captureOpacity.setValue(Int((appearance.alpha * 100).rounded()))
         captureBorder.selectItem(at: CaptureBorderStyle.allCases.firstIndex(of: appearance.borderStyle) ?? 0)
         captureWidth.setValue(appearance.borderWidth)
         capturePreview.appearanceSettings = appearance
     }
 
+    /// Picking an opaque swatch keeps the current opacity; picking "no color" or using the panel's opacity slider updates it.
+    @objc private func captureColorChanged() {
+        let picked = captureColor.color.usingColorSpace(.sRGB) ?? captureColor.color
+        if picked.alphaComponent < 0.999 {
+            captureOpacity.setValue(Int((picked.alphaComponent * 100).rounded()))
+        } else if captureOpacity.value == 0 {
+            // Picking a real color while fully transparent should make it visible again.
+            captureOpacity.setValue(100)
+        }
+        saveCaptureAppearance()
+    }
+
     @objc private func saveCaptureAppearance() {
         guard CaptureBorderStyle.allCases.indices.contains(captureBorder.indexOfSelectedItem) else { return }
         var appearance = CaptureAppearance.load()
-        appearance.setColor(captureColor.color)
+        let base = captureColor.color.usingColorSpace(.sRGB) ?? captureColor.color
+        let color = base.withAlphaComponent(CGFloat(captureOpacity.value) / 100)
+        if captureColor.color != color { captureColor.color = color }
+        appearance.setColor(color)
         appearance.borderStyle = CaptureBorderStyle.allCases[captureBorder.indexOfSelectedItem]
         appearance.borderWidth = captureWidth.value
         appearance.save()
