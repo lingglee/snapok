@@ -16,7 +16,13 @@ struct ModelsTests {
             (.anthropic, "https://api.minimax.io/anthropic", "https://api.minimax.io/anthropic/v1/messages"),
             (.openai, "", "https://api.openai.com/v1/chat/completions"),
             (.openai, "https://openrouter.ai/api", "https://openrouter.ai/api/v1/chat/completions"),
-            (.openai, "https://example.com/v1/chat/completions", "https://example.com/v1/chat/completions")
+            (.openai, "https://example.com/v1/chat/completions", "https://example.com/v1/chat/completions"),
+            (.openai, "https://api.openai.com/v1/", "https://api.openai.com/v1/chat/completions"),
+            (.openai, "https://open.bigmodel.cn/api/coding/paas/v4", "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"),
+            (.openai, "https://open.bigmodel.cn/api/paas/v4/", "https://open.bigmodel.cn/api/paas/v4/chat/completions"),
+            (.openai, "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions", "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"),
+            (.openai, "https://ark.cn-beijing.volces.com/api/v3", "https://ark.cn-beijing.volces.com/api/v3/chat/completions"),
+            (.anthropic, "https://example.com/v1", "https://example.com/v1/messages")
         ]
         for (kind, base, expected) in endpoints {
             let url = provider("p", kind, base, []).endpoint?.absoluteString
