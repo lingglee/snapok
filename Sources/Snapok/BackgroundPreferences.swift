@@ -21,6 +21,38 @@ struct BackgroundPreferences: Codable, Equatable {
     var customImagePath: String?
     var customGradient: CustomGradient?
     var usesCustomGradient: Bool?
+    /// Optional so settings saved before watermarks existed still decode.
+    var watermark: Watermark?
+
+    /// User-defined text stamped onto exported images.
+    struct Watermark: Codable, Equatable {
+        static let positionCount = 10
+        static let fontSizeRange = 8...400
+        static let maxTextLength = 200
+        var enabled = false
+        var text = ""
+        /// Font family name; nil means the system font.
+        var fontFamily: String?
+        var bold = false
+        var fontSize = 32
+        var color = [1.0, 1.0, 1.0, 1.0]
+        var opacity = 0.6
+        /// 0–8: a 3×3 grid read left to right, top to bottom; 9: tiled across the canvas.
+        var position = 8
+
+        var isVisible: Bool { enabled && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && opacity > 0 }
+
+        func normalized() -> Self {
+            var value = self
+            value.text = String(text.prefix(Self.maxTextLength))
+            if let family = fontFamily, family.isEmpty { value.fontFamily = nil }
+            value.fontSize = min(max(fontSize, Self.fontSizeRange.lowerBound), Self.fontSizeRange.upperBound)
+            value.color = BackgroundPreferences.normalized(color, fallback: Self().color)
+            value.opacity = opacity.isFinite ? min(max(opacity, 0), 1) : Self().opacity
+            value.position = min(max(position, 0), Self.positionCount - 1)
+            return value
+        }
+    }
 
     static func load(in defaults: UserDefaults = .standard) -> Self {
         guard let data = defaults.data(forKey: key),
@@ -41,6 +73,7 @@ struct BackgroundPreferences: Codable, Equatable {
             gradient.angle = gradient.angle.isFinite ? min(max(gradient.angle, 0), 360) : fallback.angle
             saved.customGradient = gradient
         }
+        saved.watermark = saved.watermark?.normalized()
         return saved
     }
 
@@ -48,7 +81,7 @@ struct BackgroundPreferences: Codable, Equatable {
         if let data = try? JSONEncoder().encode(self) { defaults.set(data, forKey: Self.key) }
     }
 
-    private static func normalized(_ color: [Double], fallback: [Double]) -> [Double] {
+    fileprivate static func normalized(_ color: [Double], fallback: [Double]) -> [Double] {
         guard color.count == 4, color.allSatisfy(\.isFinite) else { return fallback }
         return color.map { min(max($0, 0), 1) }
     }
