@@ -34,6 +34,8 @@ private final class EditorControlsDocument: NSView {
 final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     var onClose: (() -> Void)?
     var onPin: ((NSImage) -> Void)?
+    /// Called with the exported image after "Copy Image", so the pin shortcut can pin it.
+    var onCopy: ((NSImage) -> Void)?
     /// The library entry this editor writes its annotations back to on close.
     var historyID: UUID?
     var annotations: [Annotation] { preview.commitTextEditing(restoreFocus: false); return preview.annotations }
@@ -647,6 +649,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     @objc private func copyOutput() {
         guard let image = output() else { return }
         ImageExport.copy(image)
+        onCopy?(image)
         operationFeedback.show(L("Copied to clipboard.", "已复制到剪贴板。"), in: window)
     }
 

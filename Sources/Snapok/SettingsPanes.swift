@@ -230,7 +230,9 @@ final class GeneralSettingsPane: PageView {
             [Self.label(L("Language", "语言")), language],
             [Self.label(L("Theme", "主题")), theme],
             [Self.label(L("Screenshot selection", "截图选框")), captureAppearanceRow],
-            [Self.label(L("Screenshot shortcut", "截图快捷键")), ShortcutRecorder()],
+            [Self.label(L("Screenshot shortcut", "截图快捷键")), ShortcutRecorder(action: .capture)],
+            [Self.label(L("Pin shortcut", "钉图快捷键")), ShortcutRecorder(action: .pin)],
+            [NSGridCell.emptyContentView, Self.label(L("Pins the screenshot you just finished; otherwise pins the image on the clipboard.", "钉住刚刚完成的截图；没有新截图时钉住剪贴板里的图片。"), secondary: true)],
             [Self.label(L("Screenshot access", "截图权限")), screenCaptureRow],
             [NSGridCell.emptyContentView, screenCaptureHint],
             [Self.label(L("Component snapping", "组件自动吸附")), snappingRow],
@@ -405,10 +407,13 @@ final class KeycapRow: NSStackView {
     private let size: CGFloat
 
     /// Shows the capture shortcut and follows changes made in settings.
-    static func captureShortcut(size: CGFloat = 13) -> KeycapRow {
-        let row = KeycapRow(keys: HotKeyCenter.shared.current.keys, size: size)
+    static func captureShortcut(size: CGFloat = 13) -> KeycapRow { shortcut(for: .capture, size: size) }
+
+    /// Shows one global shortcut and follows changes made in settings.
+    static func shortcut(for action: HotKeyAction, size: CGFloat = 13) -> KeycapRow {
+        let row = KeycapRow(keys: HotKeyCenter.shared.hotKey(for: action).keys, size: size)
         NotificationCenter.default.addObserver(forName: HotKeyCenter.didChange, object: nil, queue: .main) { [weak row] _ in
-            MainActor.assumeIsolated { row?.setKeys(HotKeyCenter.shared.current.keys) }
+            MainActor.assumeIsolated { row?.setKeys(HotKeyCenter.shared.hotKey(for: action).keys) }
         }
         return row
     }
@@ -450,7 +455,8 @@ final class KeycapRow: NSStackView {
 /// Click "Change…", then press a new shortcut; Esc cancels. The current shortcut is paused while recording.
 @MainActor
 final class ShortcutRecorder: NSStackView {
-    private let keys = KeycapRow.captureShortcut()
+    private let action: HotKeyAction
+    private let keys: KeycapRow
     private let prompt = NSTextField(labelWithString: L("Press a new shortcut…", "请按下新的快捷键…"))
     private let change = NSButton(title: L("Change…", "修改…"), target: nil, action: nil)
     private let reset = NSButton(title: L("Restore Default", "恢复默认"), target: nil, action: nil)
@@ -458,7 +464,9 @@ final class ShortcutRecorder: NSStackView {
     private var monitor: Any?
     private var resignObserver: NSObjectProtocol?
 
-    init() {
+    init(action: HotKeyAction = .capture) {
+        self.action = action
+        keys = KeycapRow.shortcut(for: action)
         super.init(frame: .zero)
         orientation = .vertical
         alignment = .leading
@@ -539,14 +547,17 @@ final class ShortcutRecorder: NSStackView {
 
     @objc private func restoreDefault() {
         stopRecording()
-        apply(AppChannel.defaultHotKey)
+        apply(action.defaultHotKey)
     }
 
     private func apply(_ hotKey: HotKey) {
-        if HotKeyCenter.shared.change(to: hotKey) {
+        switch HotKeyCenter.shared.change(action, to: hotKey) {
+        case .changed:
             status.isHidden = true
             status.textColor = .secondaryLabelColor
-        } else {
+        case .conflict:
+            showStatus(L("\(hotKey.symbol) is already used by another Snapok shortcut.", "\(hotKey.symbol) 已被 Snapok 的另一个快捷键使用，请换一个。"), error: true)
+        case .refused:
             showStatus(L("\(hotKey.symbol) is used by macOS or another app. Try a different shortcut.", "\(hotKey.symbol) 已被系统或其他应用占用，请换一个。"), error: true)
         }
         stopRecording()
@@ -559,7 +570,7 @@ final class ShortcutRecorder: NSStackView {
     }
 
     private func updateReset() {
-        reset.isHidden = HotKeyCenter.shared.current == AppChannel.defaultHotKey
+        reset.isHidden = HotKeyCenter.shared.hotKey(for: action) == action.defaultHotKey
     }
 }
 
