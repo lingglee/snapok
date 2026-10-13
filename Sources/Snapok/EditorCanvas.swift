@@ -17,6 +17,8 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
             || selectedIndex.map { annotations[$0].kind == .step || annotations[$0].stepNumber != nil } == true
     }
     var selectedColor: NSColor = Style.colors[0]
+    var mosaicStyle = MosaicStyle.current
+    var usesMosaicStyle: Bool { selectedTool == .mosaic || selectedIndex.map { annotations[$0].kind == .mosaic } == true }
     var textStyle = AnnotationTextStyle()
     var usesTextStyle: Bool { selectedTool == .text || selectedIndex.map { annotations[$0].kind == .text } == true }
     var sizeLevel = 1 { didSet { if oldValue != sizeLevel { textStyle.pointSize = Style.lineWidth(for: .text, level: sizeLevel) } } }
@@ -195,6 +197,7 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
             record()
             annotations[index].color = selectedColor
             annotations[index].sizeLevel = sizeLevel
+            if annotations[index].kind == .mosaic { annotations[index].restyleMosaic(mosaicStyle) }
             if annotations[index].kind == .step || annotations[index].stepNumber != nil {
                 annotations[index].stepStyle = stepStyle
                 if annotations[index].kind == .step { StepMarkers.resize(&annotations[index]) }
@@ -242,6 +245,7 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
                 stepStyle = annotations[hit].stepStyle ?? .filledCircle
             }
             if annotations[hit].kind == .text { textStyle = annotations[hit].effectiveTextStyle }
+            if annotations[hit].kind == .mosaic { mosaicStyle = annotations[hit].effectiveMosaicStyle }
             if annotations[hit].kind == .text, event.clickCount == 2 {
                 editText(at: point, index: hit)
             } else { record(); lastPoint = point }
@@ -259,6 +263,7 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
         if tool == .text { editText(at: point, index: nil); return }
         start = point
         draft = Annotation(kind: tool, rect: CGRect(origin: point, size: .zero), points: [point, point], color: selectedColor, sizeLevel: sizeLevel)
+        if tool == .mosaic { draft?.mosaicStyle = mosaicStyle }
         changed()
     }
 
@@ -269,18 +274,19 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
             annotations[index] = annotations[index].offsetBy(dx: point.x - lastPoint.x, dy: point.y - lastPoint.y)
             self.lastPoint = point
         } else if let start, var draft {
-            if draft.kind == .pen || draft.kind == .mosaic { draft.points.append(point) }
+            let isStroke = draft.kind == .pen || (draft.kind == .mosaic && !draft.isBoxMosaic)
+            if isStroke { draft.points.append(point) }
             else { draft.points = [start, point] }
             let xs = draft.points.map(\.x), ys = draft.points.map(\.y)
             draft.rect = CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!)
-            if draft.kind == .pen || draft.kind == .mosaic { draft.rect = draft.rect.insetBy(dx: -draft.lineWidth / 2, dy: -draft.lineWidth / 2) }
+            if isStroke { draft.rect = draft.rect.insetBy(dx: -draft.lineWidth / 2, dy: -draft.lineWidth / 2) }
             self.draft = draft
         }
         changed()
     }
 
     override func mouseUp(with event: NSEvent) {
-        if var draft, draft.rect.width + draft.rect.height >= 2 {
+        if var draft, draft.isBoxMosaic ? draft.rect.width >= 3 && draft.rect.height >= 3 : draft.rect.width + draft.rect.height >= 2 {
             if draft.kind == .rect, autoNumberRect {
                 draft.stepNumber = String(StepMarkers.nextNumber(in: annotations))
                 draft.stepStyle = stepStyle

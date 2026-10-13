@@ -83,7 +83,7 @@ enum Keychain {
 
 extension Annotation: Codable {
     private enum CodingKeys: String, CodingKey {
-        case kind, rect, points, text, color, sizeLevel, textStyle, stepStyle, stepNumber
+        case kind, rect, points, text, color, sizeLevel, textStyle, stepStyle, stepNumber, mosaicStyle
     }
 
     init(from decoder: Decoder) throws {
@@ -98,7 +98,9 @@ extension Annotation: Codable {
             sizeLevel: try container.decode(Int.self, forKey: .sizeLevel),
             textStyle: try container.decodeIfPresent(AnnotationTextStyle.self, forKey: .textStyle),
             stepStyle: try container.decodeIfPresent(StepMarkerStyle.self, forKey: .stepStyle),
-            stepNumber: try container.decodeIfPresent(String.self, forKey: .stepNumber)
+            stepNumber: try container.decodeIfPresent(String.self, forKey: .stepNumber),
+            // Unknown styles (from a newer version) fall back to the brush rather than failing the whole item.
+            mosaicStyle: (try? container.decodeIfPresent(MosaicStyle.self, forKey: .mosaicStyle)) ?? nil
         )
     }
 
@@ -114,6 +116,7 @@ extension Annotation: Codable {
         try container.encodeIfPresent(textStyle, forKey: .textStyle)
         try container.encodeIfPresent(stepStyle, forKey: .stepStyle)
         try container.encodeIfPresent(stepNumber, forKey: .stepNumber)
+        try container.encodeIfPresent(mosaicStyle, forKey: .mosaicStyle)
     }
 }
 

@@ -648,6 +648,8 @@ struct Annotation {
     var stepNumber: String? = nil
     /// Set on masks made by「敏感信息打码」so they can be replaced or removed as a group; not saved to history.
     var autoRedaction: AutoRedactionKind? = nil
+    /// Only for `.mosaic`; nil means the classic brush stroke.
+    var mosaicStyle: MosaicStyle? = nil
 
     var lineWidth: CGFloat {
         Style.lineWidth(for: kind, level: sizeLevel)
@@ -1021,6 +1023,10 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         selectedTool == .step || (usesRectStyle && autoNumberRect) || selectedAnnotationIndex.map {
             annotations.indices.contains($0) && (annotations[$0].kind == .step || annotations[$0].stepNumber != nil)
         } == true
+    }
+    private var mosaicStyle = MosaicStyle.current
+    private var usesMosaicStyle: Bool {
+        selectedTool == .mosaic || selectedAnnotationIndex.map { annotations.indices.contains($0) && annotations[$0].kind == .mosaic } == true
     }
     private var annotations: [Annotation] = []
     private var draftAnnotation: Annotation?
@@ -1457,7 +1463,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
     }
 
     private var optionsWidth: CGFloat {
-        12 + (usesTextStyle ? 288 : CGFloat(Style.sizeLevels) * 28) + (usesStepStyle ? 126 : 0) + (usesRectStyle ? 142 : 0) + 13 + CGFloat(Style.colors.count) * 26
+        12 + (usesTextStyle ? 288 : CGFloat(Style.sizeLevels) * 28) + (usesStepStyle ? 126 : 0) + (usesRectStyle ? 142 : 0) + (usesMosaicStyle ? 176 : 0) + 13 + CGFloat(Style.colors.count) * 26
     }
 
     private func drawOptions(in panel: CGRect) {
@@ -1475,6 +1481,18 @@ final class CaptureView: NSView, NSTextFieldDelegate {
             }
             toolbarButtons.append((.numberRect, rect))
             cursorX += 142
+        }
+        if usesMosaicStyle {
+            let rect = CGRect(x: cursorX, y: panel.minY + 3, width: 170, height: 26)
+            NSAppearance(named: .aqua)?.performAsCurrentDrawingAppearance {
+                let cell = NSPopUpButtonCell(textCell: mosaicStyle.title, pullsDown: false)
+                cell.addItem(withTitle: mosaicStyle.title)
+                cell.bezelStyle = .rounded
+                cell.font = .systemFont(ofSize: 13)
+                cell.draw(withFrame: rect, in: self)
+            }
+            toolbarButtons.append((.mosaicAppearance, rect))
+            cursorX += 176
         }
         if usesStepStyle {
             let rect = CGRect(x: cursorX, y: panel.minY + 3, width: 120, height: 26)
@@ -1637,6 +1655,17 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         switch action {
         case .fontFamily:
             showTextStyleMenu(action)
+        case .mosaicAppearance:
+            guard let rect = toolbarButtons.first(where: { $0.action == action })?.rect else { return }
+            let menu = NSMenu()
+            for style in MosaicStyle.allCases {
+                let item = NSMenuItem(title: style.title, action: #selector(pickMosaicStyle(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = style.rawValue
+                item.state = mosaicStyle == style ? .on : .off
+                menu.addItem(item)
+            }
+            menu.popUp(positioning: nil, at: CGPoint(x: rect.minX, y: rect.minY), in: self)
         case .stepAppearance:
             guard let rect = toolbarButtons.first(where: { $0.action == action })?.rect else { return }
             let menu = NSMenu()
@@ -1711,6 +1740,14 @@ final class CaptureView: NSView, NSTextFieldDelegate {
     @objc private func pickTextFamily(_ item: NSMenuItem) {
         let family = item.representedObject as? String ?? ""
         textStyle.family = family.isEmpty ? nil : family
+        applyStyleToSelection()
+        needsDisplay = true
+    }
+
+    @objc private func pickMosaicStyle(_ item: NSMenuItem) {
+        guard let value = item.representedObject as? String, let style = MosaicStyle(rawValue: value) else { return }
+        mosaicStyle = style
+        MosaicStyle.current = style
         applyStyleToSelection()
         needsDisplay = true
     }
@@ -1810,6 +1847,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
                 stepStyle = annotations[index].stepStyle ?? .filledCircle
             }
             if annotations[index].kind == .text { textStyle = annotations[index].effectiveTextStyle }
+            if annotations[index].kind == .mosaic { mosaicStyle = annotations[index].effectiveMosaicStyle }
             dragState = .movingAnnotation(index: index, lastPoint: point)
             needsDisplay = true
             return
@@ -2113,7 +2151,10 @@ final class CaptureView: NSView, NSTextFieldDelegate {
 
     private func makeAnnotation(_ tool: ToolKind, from start: CGPoint, to end: CGPoint) -> Annotation {
         var annotation = Annotation(kind: tool, rect: .zero, points: [start, end], color: selectedColor, sizeLevel: sizeLevel)
+        if tool == .mosaic { annotation.mosaicStyle = mosaicStyle }
         switch tool {
+        case .mosaic where mosaicStyle.isBox:
+            annotation.rect = normalizedRect(from: start, to: end)
         case .pen, .mosaic:
             annotation.points = start == end ? [start] : [start, end]
             annotation.rect = boundingRect(for: annotation.points).insetBy(dx: -annotation.lineWidth / 2, dy: -annotation.lineWidth / 2)
@@ -2126,6 +2167,8 @@ final class CaptureView: NSView, NSTextFieldDelegate {
     private func updateDraft(to point: CGPoint) {
         guard var draft = draftAnnotation else { return }
         switch draft.kind {
+        case .mosaic where draft.isBoxMosaic:
+            draft = makeAnnotation(.mosaic, from: draft.points.first ?? point, to: point)
         case .pen, .mosaic:
             draft.points.append(point)
             draft.rect = boundingRect(for: draft.points).insetBy(dx: -draft.lineWidth / 2, dy: -draft.lineWidth / 2)
@@ -2140,6 +2183,8 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         guard var draft = draftAnnotation else { return }
         let isUsable: Bool
         switch draft.kind {
+        case .mosaic where draft.isBoxMosaic:
+            isUsable = draft.rect.width >= 3 && draft.rect.height >= 3
         case .pen, .mosaic:
             isUsable = draft.points.count >= 2
         case .arrow:
@@ -2269,6 +2314,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         guard let index = selectedAnnotationIndex, annotations.indices.contains(index) else { return }
         annotations[index].color = selectedColor
         annotations[index].sizeLevel = sizeLevel
+        if annotations[index].kind == .mosaic { annotations[index].restyleMosaic(mosaicStyle) }
         if annotations[index].kind == .step || annotations[index].stepNumber != nil {
             annotations[index].stepStyle = stepStyle
             if annotations[index].kind == .step { StepMarkers.resize(&annotations[index]) }
@@ -2410,6 +2456,7 @@ enum ToolbarAction: Equatable {
     case fontFamily
     case textBold
     case stepAppearance
+    case mosaicAppearance
     case numberRect
     case scroll
     case editImage
@@ -2433,7 +2480,7 @@ enum ToolbarAction: Equatable {
         case .save: return "square.and.arrow.down"
         case .cancel: return "xmark"
         case .done: return "checkmark"
-        case .size, .color, .fontFamily, .textBold, .stepAppearance, .numberRect: return nil
+        case .size, .color, .fontFamily, .textBold, .stepAppearance, .mosaicAppearance, .numberRect: return nil
         }
     }
 
@@ -2442,6 +2489,7 @@ enum ToolbarAction: Equatable {
         case .fontFamily: return L("Font", "字体")
         case .textBold: return L("Bold", "加粗")
         case .stepAppearance: return L("Number style", "编号样式")
+        case .mosaicAppearance: return L("Mosaic style", "马赛克样式")
         case .numberRect: return L("Automatically number rectangles", "矩形标注自动编号")
         case .select: return L("Select / Move (V)", "选择 / 移动（V）")
         case .tool(let tool): return "\(tool.title) (\(tool.shortcut))"
@@ -2620,44 +2668,43 @@ enum AnnotationRenderer {
     }
 
     private static func drawMosaic(_ annotation: Annotation, in context: CGContext, sourceImage: NSImage, origin: CGPoint, localImage: Bool = false, desktopBounds: CGRect? = nil) {
-        if localImage {
-            guard let pixelated = MosaicCache.pixelated(for: sourceImage) else { return }
+        let style = annotation.effectiveMosaicStyle
+        let rect = annotation.rect.standardized
+        guard rect.width > 0, rect.height > 0 else { return }
+
+        // Clip to the brush stroke, or to the (slightly rounded) dragged box.
+        if style.isBox {
+            let radius = MosaicCache.cornerRadius(for: annotation)
+            context.addPath(CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+        } else {
             context.addPath(smoothPath(annotation.points))
             context.replacePathWithStrokedPath()
-            context.clip()
-            NSGraphicsContext.current?.imageInterpolation = .none
-            pixelated.draw(in: CGRect(origin: .zero, size: sourceImage.size))
-            return
         }
-        guard let pixelated = MosaicCache.pixelated(for: sourceImage),
-              let source = ScreenCapture.crop(image: pixelated, to: annotation.rect.offsetBy(dx: origin.x, dy: origin.y), desktopBounds: desktopBounds) else {
-            return
-        }
-        context.addPath(smoothPath(annotation.points))
-        context.replacePathWithStrokedPath()
         context.clip()
-        NSGraphicsContext.current?.imageInterpolation = .none
-        source.draw(in: annotation.rect)
-    }
-}
 
-@MainActor
-enum MosaicCache {
-    private static var sourceID: ObjectIdentifier?
-    private static var image: NSImage?
-
-    static func pixelated(for source: NSImage) -> NSImage? {
-        if sourceID == ObjectIdentifier(source), let image {
-            return image
+        if style == .solidBox {
+            context.setFillColor(annotation.color.cgColor)
+            context.fill(rect)
+            return
         }
-        sourceID = ObjectIdentifier(source)
-        image = source.pixelated(blockSize: 10)
-        return image
-    }
-
-    static func clear() {
-        sourceID = nil
-        image = nil
+        guard let filtered = MosaicCache.image(for: annotation, source: sourceImage) else { return }
+        NSGraphicsContext.current?.imageInterpolation = style == .blurBox || style == .frostedBox ? .high : .none
+        if localImage {
+            filtered.draw(in: CGRect(origin: .zero, size: sourceImage.size))
+        } else {
+            guard let crop = ScreenCapture.crop(image: filtered, to: rect.offsetBy(dx: origin.x, dy: origin.y), desktopBounds: desktopBounds) else { return }
+            crop.draw(in: rect)
+        }
+        if style == .frostedBox {
+            // A milky veil plus a hairline edge reads as frosted glass rather than a plain blur.
+            context.setFillColor(NSColor(white: 1, alpha: 0.38).cgColor)
+            context.fill(rect)
+            let radius = MosaicCache.cornerRadius(for: annotation)
+            context.addPath(CGPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), cornerWidth: radius, cornerHeight: radius, transform: nil))
+            context.setStrokeColor(NSColor(white: 1, alpha: 0.7).cgColor)
+            context.setLineWidth(1)
+            context.strokePath()
+        }
     }
 }
 

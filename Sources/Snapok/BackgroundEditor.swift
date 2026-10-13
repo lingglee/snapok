@@ -43,6 +43,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     private var toolButtons: [NSButton] = []
     private let strokePicker = NSPopUpButton()
     private let stepStylePicker = NSPopUpButton()
+    private let mosaicStylePicker = NSPopUpButton()
     private let numberRect = NSButton(checkboxWithTitle: L("Number boxes", "画框自动编号"), target: nil, action: nil)
     private let textControls = AnnotationTextControls()
     private let strokeControls = NSStackView()
@@ -492,7 +493,12 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         stepStylePicker.setAccessibilityLabel(L("Number style", "编号样式"))
         numberRect.target = self
         numberRect.action = #selector(changeNumberRect)
-        let numberOptions = NSStackView(views: [numberRect, stepStylePicker])
+        mosaicStylePicker.addItems(withTitles: MosaicStyle.allCases.map(\.title))
+        mosaicStylePicker.target = self
+        mosaicStylePicker.action = #selector(changeMosaicStyle)
+        mosaicStylePicker.setAccessibilityLabel(L("Mosaic style", "马赛克样式"))
+        mosaicStylePicker.toolTip = L("Box styles: drag out a rectangle · Brush: paint freely", "框选样式：拖出一个矩形 · 涂抹：按住随意涂")
+        let numberOptions = NSStackView(views: [mosaicStylePicker, numberRect, stepStylePicker])
         numberOptions.spacing = 10
         let options = NSStackView(views: [strokeControls, textControls, label(L("Color", "颜色"), size: 11), annotationColor])
         options.spacing = 10
@@ -565,6 +571,12 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         preview.stepStyle = StepMarkerStyle.allCases[stepStylePicker.indexOfSelectedItem]
         preview.applyStyle()
     }
+    @objc private func changeMosaicStyle() {
+        let style = MosaicStyle.allCases[max(0, mosaicStylePicker.indexOfSelectedItem)]
+        preview.mosaicStyle = style
+        MosaicStyle.current = style
+        preview.applyStyle()
+    }
     @objc private func changeNumberRect() {
         preview.setNumberRect(numberRect.state == .on)
     }
@@ -578,7 +590,9 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         stepStylePicker.isHidden = !preview.usesStepStyle
         numberRect.isHidden = !preview.usesRectStyle
         numberRect.state = preview.autoNumberRect ? .on : .off
-        toolbarHeight?.constant = preview.usesStepStyle || preview.usesRectStyle ? 154 : 126
+        mosaicStylePicker.isHidden = !preview.usesMosaicStyle
+        mosaicStylePicker.selectItem(at: MosaicStyle.allCases.firstIndex(of: preview.mosaicStyle) ?? 0)
+        toolbarHeight?.constant = preview.usesStepStyle || preview.usesRectStyle || preview.usesMosaicStyle ? 154 : 126
         stepStylePicker.selectItem(at: StepMarkerStyle.allCases.firstIndex(of: preview.stepStyle) ?? 0)
         textControls.update(preview.textStyle, pixelScale: preview.pixelScale)
         for (index, button) in toolButtons.enumerated() {
