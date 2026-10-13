@@ -132,9 +132,10 @@ final class GeneralSettingsPane: PageView {
     private let retention = NSPopUpButton()
     private let language = NSPopUpButton()
     private let theme = NSPopUpButton()
-    private let captureColor = NSColorWell()
+    private let captureColor = ClearableColorWell()
     private let captureBorder = NSPopUpButton()
     private let captureWidth = PixelNumberControl(value: 2, range: CaptureAppearance.borderWidthRange, label: L("Screenshot selection thickness", "截图选框粗细"))
+    private let captureOpacity = PixelNumberControl(value: 100, range: 0...100, label: L("Screenshot selection opacity", "截图选框不透明度"), unit: "%")
     private let capturePreview = CaptureAppearancePreview()
     private let libraryLocation = NSTextField(labelWithString: "")
     private let restoreLibraryLocation = NSButton(title: L("Restore Default", "恢复默认"), target: nil, action: nil)
@@ -153,9 +154,10 @@ final class GeneralSettingsPane: PageView {
         theme.action = #selector(saveTheme)
         theme.setAccessibilityLabel(L("Theme", "主题"))
         captureColor.useCompactSwatch()
-        captureColor.supportsAlpha = false
+        captureColor.supportsAlpha = true
         captureColor.target = self
-        captureColor.action = #selector(saveCaptureAppearance)
+        captureColor.action = #selector(captureColorChanged)
+        NSColorPanel.shared.showsAlpha = true
         captureColor.setAccessibilityLabel(L("Screenshot selection color", "截图选框颜色"))
         captureBorder.addItems(withTitles: CaptureBorderStyle.allCases.map(\.title))
         captureBorder.target = self
@@ -164,10 +166,12 @@ final class GeneralSettingsPane: PageView {
         captureWidth.onChange = { [weak self] _ in self?.saveCaptureAppearance() }
         captureWidth.setAccessibilityLabel(L("Screenshot selection thickness", "截图选框粗细"))
         captureWidth.toolTip = L("Border thickness", "边框粗细")
+        captureOpacity.onChange = { [weak self] _ in self?.saveCaptureAppearance() }
+        captureOpacity.toolTip = L("Opacity: 0% is fully transparent", "不透明度：0% 为完全透明")
         capturePreview.setAccessibilityLabel(L("Screenshot selection preview", "截图选框预览"))
         let captureReset = NSButton(title: L("Restore Default", "恢复默认"), target: self, action: #selector(resetCaptureAppearance))
         captureReset.bezelStyle = .rounded
-        let captureAppearanceRow = NSStackView(views: [captureColor, captureBorder, captureWidth, capturePreview, captureReset])
+        let captureAppearanceRow = NSStackView(views: [captureColor, captureOpacity, captureBorder, captureWidth, capturePreview, captureReset])
         captureAppearanceRow.spacing = 10
         language.addItems(withTitles: ["English", "简体中文"])
         language.selectItem(at: AppLanguage.allCases.firstIndex(of: AppLanguage.saved()) ?? 0)
@@ -230,7 +234,9 @@ final class GeneralSettingsPane: PageView {
             [Self.label(L("Language", "语言")), language],
             [Self.label(L("Theme", "主题")), theme],
             [Self.label(L("Screenshot selection", "截图选框")), captureAppearanceRow],
-            [Self.label(L("Screenshot shortcut", "截图快捷键")), ShortcutRecorder()],
+            [Self.label(L("Screenshot shortcut", "截图快捷键")), ShortcutRecorder(action: .capture)],
+            [Self.label(L("Pin shortcut", "钉图快捷键")), ShortcutRecorder(action: .pin)],
+            [NSGridCell.emptyContentView, Self.label(L("Pins the screenshot you just finished; otherwise pins the image on the clipboard.", "钉住刚刚完成的截图；没有新截图时钉住剪贴板里的图片。"), secondary: true)],
             [Self.label(L("Screenshot access", "截图权限")), screenCaptureRow],
             [NSGridCell.emptyContentView, screenCaptureHint],
             [Self.label(L("Component snapping", "组件自动吸附")), snappingRow],
@@ -303,15 +309,31 @@ final class GeneralSettingsPane: PageView {
     private func loadCaptureAppearance() {
         let appearance = CaptureAppearance.load()
         captureColor.color = appearance.nsColor
+        captureOpacity.setValue(Int((appearance.alpha * 100).rounded()))
         captureBorder.selectItem(at: CaptureBorderStyle.allCases.firstIndex(of: appearance.borderStyle) ?? 0)
         captureWidth.setValue(appearance.borderWidth)
         capturePreview.appearanceSettings = appearance
     }
 
+    /// Picking an opaque swatch keeps the current opacity; picking "no color" or using the panel's opacity slider updates it.
+    @objc private func captureColorChanged() {
+        let picked = captureColor.color.usingColorSpace(.sRGB) ?? captureColor.color
+        if picked.alphaComponent < 0.999 {
+            captureOpacity.setValue(Int((picked.alphaComponent * 100).rounded()))
+        } else if captureOpacity.value == 0 {
+            // Picking a real color while fully transparent should make it visible again.
+            captureOpacity.setValue(100)
+        }
+        saveCaptureAppearance()
+    }
+
     @objc private func saveCaptureAppearance() {
         guard CaptureBorderStyle.allCases.indices.contains(captureBorder.indexOfSelectedItem) else { return }
         var appearance = CaptureAppearance.load()
-        appearance.setColor(captureColor.color)
+        let base = captureColor.color.usingColorSpace(.sRGB) ?? captureColor.color
+        let color = base.withAlphaComponent(CGFloat(captureOpacity.value) / 100)
+        if captureColor.color != color { captureColor.color = color }
+        appearance.setColor(color)
         appearance.borderStyle = CaptureBorderStyle.allCases[captureBorder.indexOfSelectedItem]
         appearance.borderWidth = captureWidth.value
         appearance.save()
@@ -405,10 +427,13 @@ final class KeycapRow: NSStackView {
     private let size: CGFloat
 
     /// Shows the capture shortcut and follows changes made in settings.
-    static func captureShortcut(size: CGFloat = 13) -> KeycapRow {
-        let row = KeycapRow(keys: HotKeyCenter.shared.current.keys, size: size)
+    static func captureShortcut(size: CGFloat = 13) -> KeycapRow { shortcut(for: .capture, size: size) }
+
+    /// Shows one global shortcut and follows changes made in settings.
+    static func shortcut(for action: HotKeyAction, size: CGFloat = 13) -> KeycapRow {
+        let row = KeycapRow(keys: HotKeyCenter.shared.hotKey(for: action).keys, size: size)
         NotificationCenter.default.addObserver(forName: HotKeyCenter.didChange, object: nil, queue: .main) { [weak row] _ in
-            MainActor.assumeIsolated { row?.setKeys(HotKeyCenter.shared.current.keys) }
+            MainActor.assumeIsolated { row?.setKeys(HotKeyCenter.shared.hotKey(for: action).keys) }
         }
         return row
     }
@@ -450,7 +475,8 @@ final class KeycapRow: NSStackView {
 /// Click "Change…", then press a new shortcut; Esc cancels. The current shortcut is paused while recording.
 @MainActor
 final class ShortcutRecorder: NSStackView {
-    private let keys = KeycapRow.captureShortcut()
+    private let action: HotKeyAction
+    private let keys: KeycapRow
     private let prompt = NSTextField(labelWithString: L("Press a new shortcut…", "请按下新的快捷键…"))
     private let change = NSButton(title: L("Change…", "修改…"), target: nil, action: nil)
     private let reset = NSButton(title: L("Restore Default", "恢复默认"), target: nil, action: nil)
@@ -458,7 +484,9 @@ final class ShortcutRecorder: NSStackView {
     private var monitor: Any?
     private var resignObserver: NSObjectProtocol?
 
-    init() {
+    init(action: HotKeyAction = .capture) {
+        self.action = action
+        keys = KeycapRow.shortcut(for: action)
         super.init(frame: .zero)
         orientation = .vertical
         alignment = .leading
@@ -539,14 +567,17 @@ final class ShortcutRecorder: NSStackView {
 
     @objc private func restoreDefault() {
         stopRecording()
-        apply(AppChannel.defaultHotKey)
+        apply(action.defaultHotKey)
     }
 
     private func apply(_ hotKey: HotKey) {
-        if HotKeyCenter.shared.change(to: hotKey) {
+        switch HotKeyCenter.shared.change(action, to: hotKey) {
+        case .changed:
             status.isHidden = true
             status.textColor = .secondaryLabelColor
-        } else {
+        case .conflict:
+            showStatus(L("\(hotKey.symbol) is already used by another Snapok shortcut.", "\(hotKey.symbol) 已被 Snapok 的另一个快捷键使用，请换一个。"), error: true)
+        case .refused:
             showStatus(L("\(hotKey.symbol) is used by macOS or another app. Try a different shortcut.", "\(hotKey.symbol) 已被系统或其他应用占用，请换一个。"), error: true)
         }
         stopRecording()
@@ -559,7 +590,7 @@ final class ShortcutRecorder: NSStackView {
     }
 
     private func updateReset() {
-        reset.isHidden = HotKeyCenter.shared.current == AppChannel.defaultHotKey
+        reset.isHidden = HotKeyCenter.shared.hotKey(for: action) == action.defaultHotKey
     }
 }
 

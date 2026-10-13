@@ -26,6 +26,12 @@ enum AppSettings {
         set { defaults.set(newValue, forKey: "ai.translateTarget") }
     }
 
+    /// Whether「敏感信息打码」also masks chat avatars and user names; on by default.
+    static var redactChatIdentity: Bool {
+        get { defaults.object(forKey: "ai.redactChatIdentity") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "ai.redactChatIdentity") }
+    }
+
     /// Sends each new screenshot to the AI service for a title and tags; off until the user opts in.
     static var autoName: Bool {
         get { defaults.bool(forKey: "ai.autoName") }

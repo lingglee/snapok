@@ -173,6 +173,19 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
         annotations += newAnnotations
         changed()
     }
+    /// Removes automatic masks of the given kinds and adds `added`, as one undoable step. Returns how many were removed.
+    @discardableResult
+    func replaceAutoRedaction(removing kinds: Set<AutoRedactionKind>, adding added: [Annotation]) -> Int {
+        commitTextEditing()
+        let removed = annotations.filter { $0.autoRedaction.map(kinds.contains) ?? false }.count
+        guard removed > 0 || !added.isEmpty else { return 0 }
+        record()
+        annotations = AutoRedaction.replacing(annotations, kind: \.autoRedaction, removing: kinds, adding: added)
+        selectedIndex = nil
+        changed()
+        return removed
+    }
+    func autoRedactionCount(_ kind: AutoRedactionKind) -> Int { annotations.filter { $0.autoRedaction == kind }.count }
     func deleteSelected() {
         commitTextEditing()
         guard let index = selectedIndex else { return }

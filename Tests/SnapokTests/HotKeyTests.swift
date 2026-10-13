@@ -40,6 +40,14 @@ struct HotKeyTests {
         precondition(HotKey.saved(in: defaults, default: fallback) == fallback)
         precondition(fallback.symbol == "⌥⇧A", "development builds default to Shift + Option + A")
 
+        // The pin shortcut has its own preference and default, distinct from the capture shortcut.
+        let pinFallback = HotKeyAction.pin.defaultHotKey
+        precondition(pinFallback != fallback && pinFallback.isValidGlobalShortcut && pinFallback.symbol == "⌥⇧T", "got \(pinFallback.symbol)")
+        precondition(HotKey.saved(in: defaults, key: HotKeyAction.pin.preferenceKey, default: pinFallback) == pinFallback)
+        f5.save(in: defaults, key: HotKeyAction.pin.preferenceKey)
+        precondition(HotKey.saved(in: defaults, key: HotKeyAction.pin.preferenceKey, default: pinFallback) == f5)
+        precondition(HotKeyAction.pin.preferenceKey != HotKeyAction.capture.preferenceKey)
+
         print("Passed hotkey checks: capture, ordering, validation, menu equivalents, persistence")
     }
 }

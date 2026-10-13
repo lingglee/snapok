@@ -132,7 +132,7 @@ Open **Settings…** (`⌘,`) or click **Settings** beside the version at the bo
 
 ### AI tools
 
-In **Settings → Models**, add providers with an API format (Anthropic Messages or OpenAI-compatible), base URL, API key (stored only in the Keychain), and model IDs. Presets cover Anthropic, OpenAI, OpenRouter, DeepSeek, MiniMax, and Z.AI. Select a default model and test a provider's connection before using it. A key from earlier builds becomes an Anthropic provider automatically.
+In **Settings → Models**, add providers with an API format (Anthropic Messages or OpenAI-compatible), base URL, API key (stored only in the Keychain), and model IDs. Presets cover Anthropic, OpenAI, OpenRouter, DeepSeek, MiniMax, Z.AI, Zhipu BigModel, and Zhipu Coding Plan. A base URL that already ends in a version segment (`/v1`, `/v3`, `/v4` …) only gets `/chat/completions` or `/messages` appended, so addresses like `https://open.bigmodel.cn/api/coding/paas/v4` work as typed. Select a default model and test a provider's connection before using it. A key from earlier builds becomes an Anthropic provider automatically.
 
 | Feature | Runs | Needs API key |
 | --- | --- | --- |

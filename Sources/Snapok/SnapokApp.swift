@@ -40,6 +40,7 @@ func log(_ message: String) {
 final class SnapokApp: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var captureMenuItems: [NSMenuItem] = []
+    private var pinMenuItems: [NSMenuItem] = []
     private var updateMenuItems: [NSMenuItem] = []
     private var screenshotController: ScreenshotController!
     private var mainWindow: MainWindowController?
@@ -61,6 +62,7 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
         configureMainMenu()
         configureMenuBar()
         HotKeyCenter.shared.onPress = { [weak self] in self?.startScreenshot() }
+        HotKeyCenter.shared.onPinPress = { [weak self] in self?.pinLatest() }
         HotKeyCenter.shared.start()
         updateCaptureShortcut()
         NotificationCenter.default.addObserver(forName: HotKeyCenter.didChange, object: nil, queue: .main) { [weak self] _ in
@@ -113,6 +115,7 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
     /// Open editors and pinned images keep their language until they are reopened.
     private func relocalize() {
         captureMenuItems = []
+        pinMenuItems = []
         updateMenuItems = []
         configureMainMenu()
         statusItem.menu = makeStatusMenu()
@@ -143,6 +146,9 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
         let capture = fileMenu.addItem(withTitle: L("New Screenshot", "新截图"), action: #selector(startScreenshot), keyEquivalent: "")
         capture.target = self
         captureMenuItems.append(capture)
+        let pinLatest = fileMenu.addItem(withTitle: L("Pin Latest Screenshot", "钉住最近截图"), action: #selector(pinLatest), keyEquivalent: "")
+        pinLatest.target = self
+        pinMenuItems.append(pinLatest)
         fileMenu.addItem(withTitle: L("Library", "截图库"), action: #selector(showLibrary), keyEquivalent: "l").target = self
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: L("Close Window", "关闭窗口"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
@@ -214,6 +220,10 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
         let screenshotItem = NSMenuItem(title: L("Take Screenshot", "开始截图"), action: #selector(startScreenshot), keyEquivalent: "")
         menu.addItem(screenshotItem)
         captureMenuItems.append(screenshotItem)
+        let pinItem = NSMenuItem(title: L("Pin Latest Screenshot", "钉住最近截图"), action: #selector(pinLatest), keyEquivalent: "")
+        pinItem.target = self
+        menu.addItem(pinItem)
+        pinMenuItems.append(pinItem)
         let showMainWindow = NSMenuItem(title: L("Show Main Window", "显示主窗口"), action: #selector(showLibrary), keyEquivalent: "")
         showMainWindow.target = self
         menu.addItem(showMainWindow)
@@ -232,10 +242,19 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
             item.keyEquivalent = hotKey.menuKeyEquivalent
             item.keyEquivalentModifierMask = hotKey.menuModifiers
         }
+        let pinHotKey = HotKeyCenter.shared.pinHotKey
+        for item in pinMenuItems {
+            item.keyEquivalent = pinHotKey.menuKeyEquivalent
+            item.keyEquivalentModifierMask = pinHotKey.menuModifiers
+        }
     }
 
     @objc private func startScreenshot() {
         screenshotController.start()
+    }
+
+    @objc private func pinLatest() {
+        screenshotController.pinLatest()
     }
 
     @objc private func quit() {
@@ -255,6 +274,42 @@ final class ScreenshotController {
     private var scrollSession: ScrollingCaptureSession?
     private var screenSnapshot: DesktopSnapshot?
     private var preparingCapture = false
+    /// The screenshot finished most recently with ✓ (copy), save, or the editor's Copy Image.
+    /// The pin shortcut pins it where it was captured; `rect` is nil when it should be centered.
+    private var latestCapture: (image: NSImage, rect: CGRect?, screen: NSScreen?)?
+
+    /// The pin shortcut: pins the selection while capturing, else the latest finished screenshot, else the clipboard image.
+    func pinLatest() {
+        if !windows.isEmpty {
+            ((NSApp.keyWindow as? CaptureWindow) ?? windows.first)?.pinSelection()
+            return
+        }
+        if let latest = latestCapture {
+            latestCapture = nil
+            if let rect = latest.rect { pin(latest.image, at: rect) } else { pinCentered(latest.image, on: latest.screen) }
+            log("pinned latest screenshot")
+            return
+        }
+        if let image = NSImage(pasteboard: .general), image.isValid, image.size.width >= 1, image.size.height >= 1 {
+            let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) }
+            pinCentered(image, on: screen)
+            log("pinned clipboard image")
+            return
+        }
+        NSSound.beep()
+    }
+
+    /// Remembers a finished screenshot for the pin shortcut.
+    private func rememberLatest(_ output: NSImage, styled: Bool, rect: CGRect, screen: NSScreen?) {
+        if styled {
+            let scale = screen?.backingScaleFactor ?? 1
+            let image = output.copy() as? NSImage ?? output
+            image.size = CGSize(width: output.size.width / scale, height: output.size.height / scale)
+            latestCapture = (image, nil, screen)
+        } else {
+            latestCapture = (output, rect, screen)
+        }
+    }
 
     func start() {
         if !windows.isEmpty {
@@ -346,6 +401,7 @@ final class ScreenshotController {
             openEditor(image: original, annotations: result.annotations, screen: screen, historyID: item?.id)
         case .copy:
             ImageExport.copy(output)
+            rememberLatest(output, styled: style != nil, rect: result.globalRect, screen: screen)
             closeWindows()
             record(original, result.annotations, style: style)
         case .pin:
@@ -354,6 +410,7 @@ final class ScreenshotController {
                                      height: output.size.height / (screen?.backingScaleFactor ?? 1))
                 pinCentered(output, on: screen)
             } else { pin(output, at: result.globalRect) }
+            latestCapture = nil
             closeWindows()
             record(original, result.annotations, style: style)
         case .save:
@@ -363,6 +420,7 @@ final class ScreenshotController {
                 windows.forEach { $0.orderFrontRegardless() }
                 window.makeKey()
             case .saved:
+                rememberLatest(output, styled: style != nil, rect: result.globalRect, screen: screen)
                 closeWindows()
                 record(original, result.annotations, style: style)
             case .failed:
@@ -428,6 +486,9 @@ final class ScreenshotController {
         }
         editor.onPin = { [weak self] image in
             self?.pinCentered(image, on: screen)
+        }
+        editor.onCopy = { [weak self] image in
+            self?.latestCapture = (image, nil, screen)
         }
         editor.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -587,6 +648,8 @@ struct Annotation {
     var stepNumber: String? = nil
     /// Only for `.mosaic`; nil means the classic brush stroke.
     var mosaicStyle: MosaicStyle? = nil
+    /// Set on masks made by「敏感信息打码」so they can be replaced or removed as a group; not saved to history.
+    var autoRedaction: AutoRedactionKind? = nil
 
     var lineWidth: CGFloat {
         Style.lineWidth(for: kind, level: sizeLevel)
@@ -621,6 +684,8 @@ final class CaptureWindow: NSWindow {
 
     func editImage() { (contentView as? CaptureView)?.editImage() }
 
+    func pinSelection() { (contentView as? CaptureView)?.pinSelection() }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if (contentView as? CaptureView)?.isEditingText == true {
             return super.performKeyEquivalent(with: event)
@@ -650,8 +715,14 @@ final class CaptureWindow: NSWindow {
 @MainActor
 final class PinnedImageWindow: NSPanel {
     var onClose: (() -> Void)?
+    /// The size the image was pinned at; zoom levels are relative to it.
+    let baseSize: CGSize
+    private(set) var zoom: CGFloat = 1
+    static let minZoom: CGFloat = 0.1
+    static let maxZoom: CGFloat = 8
 
     init(image: NSImage, frame: CGRect) {
+        baseSize = frame.size
         super.init(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -671,32 +742,115 @@ final class PinnedImageWindow: NSPanel {
         super.close()
         onClose?()
     }
+
+    /// Scales the pinned image, keeping `anchor` (screen coordinates, default the center) in place.
+    func setZoom(_ value: CGFloat, anchor: CGPoint? = nil) {
+        // Never shrink below a usable size, however small the original capture was.
+        let minimum = max(Self.minZoom, 24 / max(1, min(baseSize.width, baseSize.height)))
+        let clamped = min(Self.maxZoom, max(minimum, value))
+        guard abs(clamped - zoom) > 0.0001 else {
+            (contentView as? PinnedImageView)?.showZoomBadge(zoom)
+            return
+        }
+        let old = frame
+        let point = anchor ?? CGPoint(x: old.midX, y: old.midY)
+        let fx = old.width > 0 ? (point.x - old.minX) / old.width : 0.5
+        let fy = old.height > 0 ? (point.y - old.minY) / old.height : 0.5
+        let size = CGSize(width: (baseSize.width * clamped).rounded(), height: (baseSize.height * clamped).rounded())
+        let origin = CGPoint(x: (point.x - fx * size.width).rounded(), y: (point.y - fy * size.height).rounded())
+        zoom = clamped
+        setFrame(CGRect(origin: origin, size: size), display: true)
+        (contentView as? PinnedImageView)?.showZoomBadge(clamped)
+    }
+
+    func zoom(by factor: CGFloat, anchor: CGPoint? = nil) {
+        setZoom(zoom * factor, anchor: anchor)
+    }
 }
 
 @MainActor
 final class PinnedImageView: NSView {
     private let image: NSImage
+    private let badge = NSTextField(labelWithString: "")
+    private var badgeTimer: Timer?
+    private static let step: CGFloat = 1.25
 
     init(image: NSImage) {
         self.image = image
         super.init(frame: CGRect(origin: .zero, size: image.size))
+        autoresizingMask = [.width, .height]
+        badge.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        badge.textColor = .white
+        badge.alignment = .center
+        badge.wantsLayer = true
+        badge.drawsBackground = true
+        badge.backgroundColor = NSColor.black.withAlphaComponent(0.65)
+        badge.layer?.cornerRadius = 6
+        badge.layer?.masksToBounds = true
+        badge.isHidden = true
+        badge.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(badge)
+        NSLayoutConstraint.activate([
+            badge.centerXAnchor.constraint(equalTo: centerXAnchor),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 56)
+        ])
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
+    private var pinnedWindow: PinnedImageWindow? { window as? PinnedImageWindow }
+
     override var acceptsFirstResponder: Bool { true }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
+        NSGraphicsContext.current?.imageInterpolation = .high
         image.draw(in: bounds)
         Style.accent.withAlphaComponent(0.8).setStroke()
         let border = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
         border.lineWidth = 1
         border.stroke()
     }
+
+    func showZoomBadge(_ zoom: CGFloat) {
+        badge.stringValue = " \(Int((zoom * 100).rounded()))% "
+        badge.isHidden = bounds.width < 60 || bounds.height < 24
+        badgeTimer?.invalidate()
+        badgeTimer = Timer.scheduledTimer(withTimeInterval: 0.9, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.badge.isHidden = true }
+        }
+    }
+
+    // MARK: Zoom
+
+    /// Mouse wheel and two-finger scroll zoom around the pointer: up or away zooms in.
+    override func scrollWheel(with event: NSEvent) {
+        var delta = event.scrollingDeltaY
+        if delta == 0 { delta = event.scrollingDeltaX }
+        guard delta != 0 else { return }
+        // Undo "natural scrolling" so the wheel always zooms the same way.
+        if event.isDirectionInvertedFromDevice { delta = -delta }
+        let factor: CGFloat = event.hasPreciseScrollingDeltas
+            ? exp(delta * 0.01)
+            : pow(1.1, max(-5, min(5, delta)))
+        pinnedWindow?.zoom(by: factor, anchor: NSEvent.mouseLocation)
+    }
+
+    override func magnify(with event: NSEvent) {
+        pinnedWindow?.zoom(by: 1 + event.magnification, anchor: NSEvent.mouseLocation)
+    }
+
+    @objc private func zoomIn() { pinnedWindow?.zoom(by: Self.step) }
+
+    @objc private func zoomOut() { pinnedWindow?.zoom(by: 1 / Self.step) }
+
+    @objc private func actualSize() { pinnedWindow?.setZoom(1) }
+
+    // MARK: Mouse and keys
 
     override func mouseDown(with event: NSEvent) {
         if event.clickCount >= 2 {
@@ -711,17 +865,34 @@ final class PinnedImageView: NSView {
         menu.addItem(NSMenuItem(title: L("Copy", "复制"), action: #selector(copyImage), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: L("Save…", "保存…"), action: #selector(saveImage), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
+        let zoomIn = NSMenuItem(title: L("Zoom In", "放大"), action: #selector(zoomIn), keyEquivalent: "=")
+        zoomIn.keyEquivalentModifierMask = .command
+        let zoomOut = NSMenuItem(title: L("Zoom Out", "缩小"), action: #selector(zoomOut), keyEquivalent: "-")
+        zoomOut.keyEquivalentModifierMask = .command
+        let actual = NSMenuItem(title: L("Actual Size", "原始大小"), action: #selector(actualSize), keyEquivalent: "0")
+        actual.keyEquivalentModifierMask = .command
+        [zoomIn, zoomOut, actual].forEach { menu.addItem($0) }
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: L("Close", "关闭"), action: #selector(closeWindow), keyEquivalent: ""))
         menu.items.forEach { $0.target = self }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == UInt16(kVK_Escape) {
+        let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        let command = flags.contains(.command) && !flags.contains(.control) && !flags.contains(.option)
+        switch Int(event.keyCode) {
+        case kVK_Escape:
             window?.close()
-        } else if event.keyCode == UInt16(kVK_ANSI_C), event.modifierFlags.contains(.command) {
+        case kVK_ANSI_C where command:
             copyImage()
-        } else {
+        case kVK_ANSI_Equal where command, kVK_ANSI_KeypadPlus:
+            zoomIn()
+        case kVK_ANSI_Minus where command, kVK_ANSI_KeypadMinus:
+            zoomOut()
+        case kVK_ANSI_0 where command, kVK_ANSI_Keypad0:
+            actualSize()
+        default:
             super.keyDown(with: event)
         }
     }
@@ -771,7 +942,8 @@ final class PreferencesView: NSView {
             L("Esc: cancel capture; right-click: select a new region", "Esc：退出截图；右键：重新选择区域"),
             L("\(AppChannel.editImageHotKey.symbol): edit image; ⌘Z: undo; ⌘S: save; Delete: remove the selected annotation", "\(AppChannel.editImageHotKey.symbol) 编辑图片，⌘Z 撤销，⌘S 保存，Delete 删除选中的标注"),
             L("Arrow keys: adjust selection (hold Shift for 10-point steps)", "方向键微调选区（按住 Shift 每次 10 点）"),
-            L("Pinned images: double-click or Esc to close; right-click to copy or save", "钉图：双击或 Esc 关闭，右键可复制/保存")
+            L("Pinned images: scroll or pinch to zoom, ⌘0 for actual size; double-click or Esc to close", "钉图：滚轮或双指缩放，⌘0 原始大小；双击或 Esc 关闭"),
+            L("Pin shortcut: ", "钉图快捷键：") + HotKeyCenter.shared.pinHotKey.description + L(" (pins the latest screenshot)", "（钉住刚完成的截图）")
         ]
 
         var y: CGFloat = 264
@@ -1004,7 +1176,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         let width = CGFloat(toolFocusHighlighted ? max(3, captureAppearance.borderWidth) : captureAppearance.borderWidth) / pixelScale
         captureAppearance.stroke(rect.insetBy(dx: -width / 2, dy: -width / 2), width: width)
 
-        captureAppearance.nsColor.setFill()
+        captureAppearance.handleColor.setFill()
         for handle in SelectionHandle.allCases {
             NSBezierPath(rect: handleRect(for: handle, in: rect)).fill()
         }
@@ -1101,7 +1273,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         drawScreenRegion(source, into: box)
 
         let pixel = max(1, boxSize / (sourceSize * pixelScale))
-        captureAppearance.nsColor.withAlphaComponent(0.45).setFill()
+        captureAppearance.handleColor.withAlphaComponent(0.45).setFill()
         CGRect(x: box.minX, y: box.midY - pixel / 2, width: box.width, height: pixel).fill()
         CGRect(x: box.midX - pixel / 2, y: box.minY, width: pixel, height: box.height).fill()
 
@@ -2182,6 +2354,8 @@ final class CaptureView: NSView, NSTextFieldDelegate {
     // MARK: Finish
 
     func editImage() { finish(.editImage) }
+
+    func pinSelection() { finish(.pin) }
 
     private func finish(_ mode: CaptureFinishMode) {
         commitActiveTextField()
