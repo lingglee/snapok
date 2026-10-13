@@ -1168,7 +1168,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         let width = CGFloat(toolFocusHighlighted ? max(3, captureAppearance.borderWidth) : captureAppearance.borderWidth) / pixelScale
         captureAppearance.stroke(rect.insetBy(dx: -width / 2, dy: -width / 2), width: width)
 
-        captureAppearance.nsColor.setFill()
+        captureAppearance.handleColor.setFill()
         for handle in SelectionHandle.allCases {
             NSBezierPath(rect: handleRect(for: handle, in: rect)).fill()
         }
@@ -1265,7 +1265,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         drawScreenRegion(source, into: box)
 
         let pixel = max(1, boxSize / (sourceSize * pixelScale))
-        captureAppearance.nsColor.withAlphaComponent(0.45).setFill()
+        captureAppearance.handleColor.withAlphaComponent(0.45).setFill()
         CGRect(x: box.minX, y: box.midY - pixel / 2, width: box.width, height: pixel).fill()
         CGRect(x: box.midX - pixel / 2, y: box.minY, width: pixel, height: box.height).fill()
 
