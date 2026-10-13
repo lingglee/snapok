@@ -50,6 +50,10 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     private let annotationColor = NSColorWell()
     private let quickActions: [ToolbarAction] = ToolKind.allCases.map { .tool($0) } + [.undo, .pin, .save, .cancel, .done]
     private let preview: BackgroundPreview
+    /// The「打码头像与用户名」checkbox item in the AI Tools menu.
+    private weak var chatIdentityItem: NSMenuItem?
+    /// Avatars and names found by the last redaction scan of this image; nil until a scan has run.
+    private var identityBoxes: [CGRect]?
     private let backgroundPicker = NSPopUpButton()
     private let colorWell = NSColorWell()
     private let borderColorWell = NSColorWell()
@@ -850,18 +854,26 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         menu.controlSize = .large
         menu.addItem(withTitle: L("AI Tools", "AI 工具"))
         menu.item(at: 0)?.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
-        let entries: [(String, String, Selector)] = [
-            (L("Recognize Text", "识别文字"), "text.viewfinder", #selector(recognizeText)),
-            (L("Redact Sensitive Information", "敏感信息打码"), "eye.slash", #selector(redactSensitive)),
-            (L("Translate Image", "翻译图片"), "character.bubble", #selector(translateText)),
-            (L("Ask a Question…", "提问…"), "questionmark.bubble", #selector(askQuestion))
-        ]
-        for (title, symbol, action) in entries {
+        func add(_ title: String, _ symbol: String?, _ action: Selector, indent: Int = 0) -> NSMenuItem {
             menu.addItem(withTitle: title)
-            menu.lastItem?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
-            menu.lastItem?.target = self
-            menu.lastItem?.action = action
+            let item = menu.lastItem!
+            if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
+            item.target = self
+            item.action = action
+            item.indentationLevel = indent
+            return item
         }
+        _ = add(L("Recognize Text", "识别文字"), "text.viewfinder", #selector(recognizeText))
+        _ = add(L("Redact Sensitive Info, Avatars & Names", "敏感信息打码（含头像、用户名）"), "eye.slash", #selector(redactSensitive))
+        let toggle = add(L("Redact Avatars & User Names", "打码头像与用户名"), nil, #selector(toggleChatIdentity), indent: 1)
+        toggle.state = AppSettings.redactChatIdentity ? .on : .off
+        toggle.toolTip = L("Checked: avatars and user names are masked too. Unchecked: they are restored.",
+                           "勾选：头像和用户名一起打码；取消勾选：恢复头像和用户名")
+        chatIdentityItem = toggle
+        _ = add(L("Remove Automatic Redaction", "取消全部自动打码"), nil, #selector(clearAutoRedaction), indent: 1)
+        menu.menu?.addItem(.separator())
+        _ = add(L("Translate Image", "翻译图片"), "character.bubble", #selector(translateText))
+        _ = add(L("Ask a Question…", "提问…"), "questionmark.bubble", #selector(askQuestion))
         menu.toolTip = L("Recognition and redaction run locally. Translation and questions send the screenshot to the AI service.", "文字识别和打码在本机完成；翻译和提问会把截图发送给 AI 服务")
         return menu
     }
@@ -882,25 +894,91 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         }
     }
 
+    /// Masks (normalized boxes) in image points, tagged so they can be removed as a group later.
+    private func masks(_ boxes: [CGRect], _ kind: AutoRedactionKind) -> [Annotation] {
+        let size = preview.sourceImage.size
+        return boxes.map { box in
+            var mask = SensitiveDetector.mosaic(covering: CGRect(
+                x: box.minX * size.width, y: box.minY * size.height,
+                width: box.width * size.width, height: box.height * size.height
+            ))
+            mask.autoRedaction = kind
+            return mask
+        }
+    }
+
+    /// Scans once, then masks right away: sensitive values always, avatars and names only while the toggle is checked.
+    /// Running it again replaces the previous automatic masks instead of stacking new ones.
     @objc private func redactSensitive() {
         Telemetry.capture("ai_used", ["feature": "redact"])
-        operationFeedback.show(L("Finding sensitive information…", "正在查找敏感信息…"), in: window, success: false)
+        operationFeedback.show(L("Finding sensitive information, avatars, and user names…", "正在查找敏感信息、头像和用户名…"), in: window, success: false)
         let source = preview.source
-        let size = preview.sourceImage.size
         Task { @MainActor in
-            let boxes = await TextScanner.scan(source).sensitiveBoxes
-            let masks = boxes.map { box in
-                SensitiveDetector.mosaic(covering: CGRect(
-                    x: box.minX * size.width, y: box.minY * size.height,
-                    width: box.width * size.width, height: box.height * size.height
-                ))
+            let scan = await TextScanner.scan(source)
+            let chat = await ChatRedactor.detect(image: source, blocks: scan.blocks)
+            let candidates = RedactionCandidates.make(sensitive: scan.sensitiveBoxes, avatars: chat.avatars,
+                                                      names: chat.names, blocks: scan.blocks)
+            let identity = AutoRedaction.identityBoxes(candidates)
+            identityBoxes = identity
+            let includeIdentity = AppSettings.redactChatIdentity
+            let added = masks(scan.sensitiveBoxes, .sensitive) + (includeIdentity ? masks(identity, .chatIdentity) : [])
+            preview.replaceAutoRedaction(removing: [.sensitive, .chatIdentity], adding: added)
+            let avatars = RedactionCandidates.count(candidates, .avatar), names = RedactionCandidates.count(candidates, .name)
+            guard !added.isEmpty else {
+                operationFeedback.show(identity.isEmpty
+                    ? L("No sensitive information, chat avatars, or user names found.", "没有发现手机号、邮箱、证件号、密钥，也没有识别到聊天头像和用户名。")
+                    : L("Found \(avatars) avatars and \(names) user names. Check「Redact Avatars & User Names」to mask them.",
+                        "识别到 \(avatars) 个头像、\(names) 个用户名；勾选「打码头像与用户名」即可打码。"), in: window)
+                return
             }
-            preview.append(masks)
-            let message = masks.isEmpty
-                ? L("No sensitive phone numbers, emails, ID numbers, or keys found.", "没有发现手机号、邮箱、证件号或密钥等敏感信息。")
-                : L("Redacted \(masks.count) sensitive regions. Use Undo to restore them.", "已给 \(masks.count) 处敏感信息打码，可用撤销恢复。")
+            var message = Self.redactionSummary(values: scan.sensitiveBoxes.count,
+                                                 avatars: includeIdentity ? avatars : 0, names: includeIdentity ? names : 0)
+            if !includeIdentity && !identity.isEmpty {
+                message += L(" Avatars and user names were left as is.", "头像和用户名未打码（未勾选）。")
+            }
             operationFeedback.show(message, in: window)
         }
+    }
+
+    /// Checked: masks the avatars and names found by the last scan. Unchecked: removes only those masks, restoring the original.
+    @objc private func toggleChatIdentity() {
+        let on = !AppSettings.redactChatIdentity
+        AppSettings.redactChatIdentity = on
+        chatIdentityItem?.state = on ? .on : .off
+        if on {
+            guard let boxes = identityBoxes else {
+                operationFeedback.show(L("On. Redaction will also mask avatars and user names.", "已勾选，打码时会一并处理头像和用户名。"), in: window)
+                return
+            }
+            guard !boxes.isEmpty else {
+                operationFeedback.show(L("No avatars or user names found in this image.", "这张图里没有识别到头像和用户名。"), in: window)
+                return
+            }
+            preview.replaceAutoRedaction(removing: [.chatIdentity], adding: masks(boxes, .chatIdentity))
+            operationFeedback.show(L("Avatars and user names redacted.", "已打码 \(boxes.count) 处头像和用户名。"), in: window)
+        } else {
+            let removed = preview.replaceAutoRedaction(removing: [.chatIdentity], adding: [])
+            operationFeedback.show(removed > 0
+                ? L("Avatars and user names restored.", "已恢复头像和用户名。")
+                : L("Off. Redaction will leave avatars and user names as is.", "已取消勾选，打码时不处理头像和用户名。"), in: window)
+        }
+    }
+
+    /// Removes every mask made by automatic redaction; hand-drawn mosaics stay.
+    @objc private func clearAutoRedaction() {
+        let removed = preview.replaceAutoRedaction(removing: [.sensitive, .chatIdentity], adding: [])
+        operationFeedback.show(removed > 0
+            ? L("Automatic redaction removed.", "已取消全部自动打码，图片已恢复。")
+            : L("There is no automatic redaction to remove.", "当前没有自动打码的内容。"), in: window)
+    }
+
+    static func redactionSummary(values: Int, avatars: Int, names: Int) -> String {
+        var english: [String] = [], chinese: [String] = []
+        if values > 0 { english.append("\(values) sensitive values"); chinese.append("\(values) 处敏感信息") }
+        if avatars > 0 { english.append("\(avatars) avatars"); chinese.append("\(avatars) 个头像") }
+        if names > 0 { english.append("\(names) user names"); chinese.append("\(names) 个用户名") }
+        return L("Redacted \(english.joined(separator: ", ")).",
+                 "已打码：\(chinese.joined(separator: "、"))。")
     }
 
     @objc private func translateText() {

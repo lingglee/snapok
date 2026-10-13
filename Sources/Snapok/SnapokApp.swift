@@ -646,6 +646,8 @@ struct Annotation {
     var textStyle: AnnotationTextStyle? = nil
     var stepStyle: StepMarkerStyle? = nil
     var stepNumber: String? = nil
+    /// Set on masks made by「敏感信息打码」so they can be replaced or removed as a group; not saved to history.
+    var autoRedaction: AutoRedactionKind? = nil
 
     var lineWidth: CGFloat {
         Style.lineWidth(for: kind, level: sizeLevel)
