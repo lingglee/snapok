@@ -60,13 +60,15 @@ struct ModelProvider: Codable, Equatable, Sendable {
         .openai: "https://api.openai.com/v1"
     ]
 
-    /// Uses a base that already ends in the full path as is, completes one ending in /v1, and appends /v1/… otherwise.
+    /// Uses a base that already ends in the full path as is, completes one ending in a version segment
+    /// (/v1, /v3, /v4 …, e.g. Zhipu's https://open.bigmodel.cn/api/coding/paas/v4), and appends /v1/… otherwise.
     var endpoint: URL? {
         let trimmed = apiBase.trimmingCharacters(in: .whitespaces)
         let base = (trimmed.isEmpty ? Self.defaultBase[kind]! : trimmed)
             .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
-        let path = kind == .anthropic ? "/v1/messages" : "/v1/chat/completions"
-        let full = base.hasSuffix(path) ? base : base.hasSuffix("/v1") ? base + path.dropFirst(3) : base + path
+        let tail = kind == .anthropic ? "/messages" : "/chat/completions"
+        let endsWithVersion = base.range(of: #"/v\d+$"#, options: .regularExpression) != nil
+        let full = base.hasSuffix(tail) ? base : endsWithVersion ? base + tail : base + "/v1" + tail
         guard let url = URL(string: full), url.scheme == "https" || url.scheme == "http", url.host != nil else { return nil }
         return url
     }
@@ -104,6 +106,8 @@ struct ModelsConfig: Codable, Equatable, Sendable {
         Preset(id: "deepseek", label: "DeepSeek", kind: .openai, apiBase: "https://api.deepseek.com", model: ModelEntry(id: "deepseek-v4-flash", title: "DeepSeek V4 Flash")),
         Preset(id: "minimax", label: "MiniMax", kind: .anthropic, apiBase: "https://api.minimax.io/anthropic", model: ModelEntry(id: "MiniMax-M3", title: "MiniMax M3")),
         Preset(id: "glm", label: "Z.AI", kind: .anthropic, apiBase: "https://api.z.ai/api/anthropic", model: ModelEntry(id: "GLM-5.2", title: "GLM-5.2")),
+        Preset(id: "zhipu", label: L("Zhipu (BigModel)", "智谱 BigModel"), kind: .openai, apiBase: "https://open.bigmodel.cn/api/paas/v4", model: ModelEntry(id: "glm-4.6", title: "GLM-4.6")),
+        Preset(id: "zhipu-coding", label: L("Zhipu Coding Plan", "智谱 Coding Plan"), kind: .openai, apiBase: "https://open.bigmodel.cn/api/coding/paas/v4", model: ModelEntry(id: "glm-4.6", title: "GLM-4.6")),
         Preset(id: "custom", label: "", kind: .openai, apiBase: "", model: ModelEntry(id: ""))
     ]
 
