@@ -54,10 +54,34 @@ struct EditorCanvasTests {
         print("Passed native capture pixel fidelity: Retina, 1080p, offset displays, crop, render, history and PNG")
     }
 
+    @MainActor static func testAnnotationScrollScale() {
+        // Shapes and strokes grow around their center; the stroke width stays.
+        let box = Annotation(kind: .rect, rect: CGRect(x: 100, y: 100, width: 80, height: 40),
+                             points: [CGPoint(x: 100, y: 100), CGPoint(x: 180, y: 140)], color: .red, sizeLevel: 1)
+        let big = box.scaled(by: 1.5)!
+        precondition(big.rect == CGRect(x: 80, y: 90, width: 120, height: 60), "A shape must scale around its center")
+        precondition(big.points == [CGPoint(x: 80, y: 90), CGPoint(x: 200, y: 150)] && big.lineWidth == box.lineWidth)
+        // Shrinking stops before a shape disappears; step markers keep their fixed sizes.
+        precondition(box.scaled(by: 0.05) == nil, "A shape must not shrink away")
+        let step = Annotation(kind: .step, rect: CGRect(x: 0, y: 0, width: 36, height: 36), points: [], color: .red, sizeLevel: 1)
+        precondition(step.scaled(by: 2) == nil)
+        // Text grows its font, stays centered, and is measured again rather than stretched.
+        var style = AnnotationTextStyle()
+        style.pointSize = 20
+        let label = Annotation(kind: .text, rect: CGRect(x: 50, y: 50, width: 60, height: 24), points: [CGPoint(x: 50, y: 50)],
+                               text: "Hello", color: .red, sizeLevel: 1, textStyle: style)
+        let larger = label.scaled(by: 2)!
+        precondition(larger.textStyle?.pointSize == 40, "Text must scale its font size")
+        precondition(abs(larger.rect.midX - label.rect.midX) <= 0.5 && abs(larger.rect.midY - label.rect.midY) <= 0.5)
+        precondition(larger.rect.width > label.rect.width && larger.points == [larger.rect.origin])
+        print("Passed annotation scroll scaling")
+    }
+
     static func main() throws {
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.prohibited)
         testCapturePixelFidelity()
+        testAnnotationScrollScale()
         // Exercise every pin resize region through AppKit's actual event handlers.
         let pinFrame = CGRect(x: -500, y: 200, width: 320, height: 160)
         let pin = PinnedImageWindow(image: NSImage(size: pinFrame.size), frame: pinFrame)

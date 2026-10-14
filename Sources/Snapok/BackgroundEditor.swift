@@ -83,6 +83,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     private var sliders: [NSSlider] = []
     private var values: [NSTextField] = []
     private let shadowButton = NSButton(checkboxWithTitle: L("Soft shadow", "柔和阴影"), target: nil, action: nil)
+    private let adaptToImage = NSButton(checkboxWithTitle: L("Fit to screenshot size", "按截图大小自动调整"), target: nil, action: nil)
     private var wallpaper: NSImage?
     /// The screen the capture came from, whose wallpaper the "Desktop Wallpaper" background uses.
     private let screen: NSScreen?
@@ -109,7 +110,12 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     private let fontFamilies = NSFontManager.shared.availableFontFamilies.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
 
     init(image: NSImage, screen: NSScreen?, annotations: [Annotation] = [], style: BackgroundPreferences? = nil) {
-        if let style { preferences = style }
+        // A library item keeps its own style; a new screenshot gets the last style fitted to its size.
+        if let style {
+            preferences = style
+        } else if let pixels = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            preferences = preferences.adapted(toPixels: CGSize(width: pixels.width, height: pixels.height))
+        }
         preview = BackgroundPreview(image: image, annotations: annotations)
         self.screen = screen ?? NSScreen.main
         wallpaper = DesktopWallpaper.cached(for: self.screen)
@@ -327,6 +333,11 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         add(label(L("Padding", "留白"), size: 14, weight: .semibold))
         add(controlRow(L("Horizontal", "左右"), value: 120, maximum: 600, tag: 0))
         add(controlRow(L("Vertical", "上下"), value: 120, maximum: 600, tag: 1))
+        adaptToImage.target = self
+        adaptToImage.action = #selector(updateComposition)
+        adaptToImage.toolTip = L("Padding, corners, and the watermark keep their proportions on screenshots of other sizes.",
+                                 "换一张大小不同的截图时，留白、圆角和水印按比例缩放，保持同样的观感。")
+        add(adaptToImage)
         add(label(L("Appearance", "截图外观"), size: 14, weight: .semibold))
         add(controlRow(L("Border", "描边"), value: 0, maximum: 20, tag: 2))
         borderColorWell.color = .white
@@ -619,6 +630,12 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     @objc private func actualSize() { preview.setZoom(1) }
     @objc private func fitPreview() { preview.fitToWindow() }
     @objc private func quickAction(_ sender: NSButton) { performQuickAction(quickActions[sender.tag]) }
+    /// Esc with the focus outside the canvas (a slider, a picker): close, as the toolbar's ✕ does. The canvas and
+    /// text fields handle Esc themselves first.
+    override func cancelOperation(_ sender: Any?) {
+        window?.close()
+    }
+
     private func performQuickAction(_ action: ToolbarAction) {
         switch action {
         case .tool(let tool): preview.chooseTool(preview.selectedTool == tool ? nil : tool)
@@ -923,6 +940,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
             values[index].integerValue = value
         }
         shadowButton.state = preferences.shadow ? .on : .off
+        adaptToImage.state = preferences.adaptsToImage == false ? .off : .on
         restoreWatermark()
         backgroundPicker.selectItem(withTag: selectedBackground == 4 ? 0 : selectedBackground)
         switch selectedBackground {
@@ -951,6 +969,8 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         preferences.borderColor = Self.components(borderColorWell.color)
         preferences.watermark = watermarkSettings
         preferences.plain = showsOriginal ? true : nil
+        preferences.adaptsToImage = adaptToImage.state == .on
+        preferences.referenceSize = [Double(preview.source.width), Double(preview.source.height)]
         preferences.save()
     }
 

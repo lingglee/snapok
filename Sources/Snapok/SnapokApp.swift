@@ -343,7 +343,9 @@ final class ScreenshotController {
 
     /// Frames a screenshot in the last editing style.
     private func styled(_ image: NSImage, screen: NSScreen?) -> NSImage? {
-        CaptureStyle(preferences: .load(), screen: screen).render(image)
+        guard let pixels = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let preferences = BackgroundPreferences.load().adapted(toPixels: CGSize(width: pixels.width, height: pixels.height))
+        return CaptureStyle(preferences: preferences, screen: screen).render(image)
     }
 
     /// The paste-styled shortcut pastes the other version of the copied screenshot into the front app: framed in the
@@ -1108,6 +1110,11 @@ final class CaptureView: NSView, NSTextFieldDelegate {
     private var focusIndex = 0
     private var wholeWindow = false
     private var focusScroll: CGFloat = 0
+    /// A region the user scrolled out to, and where the cursor was then. It survives the small moves of a hand
+    /// on its way to clicking; a larger move means a new target, and snapping goes back to components.
+    private var expandedRegion: CGRect?
+    private var expandedAt: CGPoint = .zero
+    private static let expandedSlack: CGFloat = 40
     private let pixelScale: CGFloat
 
     private var selection: CGRect?
@@ -1907,6 +1914,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         mouseInside = false
         cancelFocusQuery()
         focusCandidates = []
+        expandedRegion = nil
         hoverRect = nil
         hoveredAction = nil
         needsDisplay = true
@@ -2125,6 +2133,10 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         focusIndex = 0
         focusScroll = 0
         hoverRect = fallback
+        if let expanded = expandedRegion, !expanded.contains(mouseLocation) || !fallback.contains(expanded)
+            || hypot(mouseLocation.x - expandedAt.x, mouseLocation.y - expandedAt.y) > Self.expandedSlack {
+            expandedRegion = nil
+        }
         guard !wholeWindow, let target = windowTargets.first(where: { $0.frame.contains(global) }) else { return }
         // Menu bar status items have their own window bounds, so narrowing to one works without Accessibility.
         if target.containerFrame != nil {
@@ -2140,6 +2152,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         if let previous, previous.contains(mouseLocation), fallback.contains(previous) {
             hoverRect = previous
         }
+        if let expandedRegion { hoverRect = expandedRegion }
         let generation = focusGeneration
         let height = primaryHeight
         focusTask = Task { [weak self] in
@@ -2159,8 +2172,11 @@ final class CaptureView: NSView, NSTextFieldDelegate {
             }
             regions.append(fallback)
             self.focusCandidates = regions
-            self.focusIndex = 0
-            self.hoverRect = regions.first
+            // Stay at the level the user scrolled out to: the smallest region that still covers it.
+            self.focusIndex = self.expandedRegion.flatMap { expanded in
+                regions.firstIndex { $0.insetBy(dx: -2, dy: -2).contains(expanded) }
+            } ?? 0
+            self.hoverRect = regions[self.focusIndex]
             self.needsDisplay = true
         }
     }
@@ -2174,6 +2190,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        if selection != nil { scaleAnnotation(with: event); return }
         guard selection == nil, mouseInside, !wholeWindow, isPicking,
               focusCandidates.count > 1, abs(event.scrollingDeltaY) > 0.1,
               event.momentumPhase.isEmpty else { return }
@@ -2184,6 +2201,22 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         focusIndex = min(max(focusIndex + (focusScroll > 0 ? 1 : -1), 0), focusCandidates.count - 1)
         focusScroll = 0
         hoverRect = focusCandidates[focusIndex]
+        expandedRegion = focusIndex > 0 ? hoverRect : nil
+        expandedAt = mouseLocation
+        needsDisplay = true
+    }
+
+    /// Scrolling over the selected annotation (or any one under the cursor) zooms it around its center.
+    private func scaleAnnotation(with event: NSEvent) {
+        guard !isEditingText, case .idle = dragState, abs(event.scrollingDeltaY) > 0.1 else { return }
+        let point = mouseLocation
+        let index = selectedAnnotationIndex.flatMap { index in
+            annotations.indices.contains(index) && annotations[index].rect.insetBy(dx: -8, dy: -8).contains(point) ? index : nil
+        } ?? hitAnnotation(at: point, matchingTool: false)
+        guard let index, let scaled = annotations[index].scaled(by: Annotation.scrollScale(event)) else { return }
+        annotations[index] = scaled
+        selectedAnnotationIndex = index
+        if scaled.kind == .text { textStyle = scaled.effectiveTextStyle }
         needsDisplay = true
     }
 
@@ -3010,6 +3043,38 @@ enum ScreenCapture {
 }
 
 extension Annotation {
+    /// Scroll-wheel zoom of one annotation around the center of its bounds. Text grows its font instead of being
+    /// stretched; step markers have fixed sizes and return nil, as does a change that would make a shape vanish.
+    @MainActor func scaled(by factor: CGFloat) -> Annotation? {
+        guard factor.isFinite, factor > 0, factor != 1, kind != .step,
+              factor > 1 || max(rect.width, rect.height) * factor >= 8 else { return nil }
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        var copy = self
+        if kind == .text {
+            var style = effectiveTextStyle
+            let size = min(288, max(1, style.pointSize * factor))
+            guard size != style.pointSize else { return nil }
+            style.pointSize = size
+            copy.textStyle = style
+            let measured = (text as NSString).size(withAttributes: [.font: style.font])
+            copy.rect = CGRect(x: center.x - ceil(measured.width) / 2, y: center.y - ceil(measured.height) / 2,
+                               width: ceil(measured.width), height: ceil(measured.height))
+            copy.points = [copy.rect.origin]
+            return copy
+        }
+        func scale(_ p: CGPoint) -> CGPoint {
+            CGPoint(x: center.x + (p.x - center.x) * factor, y: center.y + (p.y - center.y) * factor)
+        }
+        copy.rect = CGRect(origin: scale(rect.origin), size: CGSize(width: rect.width * factor, height: rect.height * factor))
+        copy.points = points.map(scale)
+        return copy
+    }
+
+    /// The zoom factor for one scroll event: scrolling up grows, down shrinks, at the same pace for wheels and trackpads.
+    static func scrollScale(_ event: NSEvent) -> CGFloat {
+        exp(event.scrollingDeltaY * (event.hasPreciseScrollingDeltas ? 1 : 16) / 300)
+    }
+
     func offsetBy(dx: CGFloat, dy: CGFloat) -> Annotation {
         var copy = self
         copy.rect = rect.offsetBy(dx: dx, dy: dy)

@@ -74,7 +74,22 @@ struct BackgroundRendererTests {
         }
         try checkPreferences()
         checkWatermark(source: source)
-        print("Passed background checks: dimensions/orientation, zero padding, rounded corners, border pixels, custom image fill, export limits, preference restoration, watermark")
+        // A style set on one screenshot keeps its proportions on another: twice the shorter side doubles padding, corners, and text.
+        var style = BackgroundPreferences()
+        style.horizontalPadding = 60; style.verticalPadding = 40; style.cornerRadius = 12; style.borderWidth = 3
+        style.watermark = .init(enabled: true, text: "snapok", fontSize: 24)
+        style.referenceSize = [1000, 600]
+        let fitted = style.adapted(toPixels: CGSize(width: 2000, height: 1200))
+        precondition(fitted.horizontalPadding == 120 && fitted.verticalPadding == 80 && fitted.cornerRadius == 24, "Padding and corners scale")
+        precondition(fitted.watermark?.fontSize == 48 && fitted.borderWidth == 3, "Watermark scales; the border stays")
+        precondition(style.adapted(toPixels: CGSize(width: 100, height: 60)).horizontalPadding == 24, "Scaling is limited to 0.4×")
+        precondition(style.adapted(toPixels: CGSize(width: 600, height: 1200)).horizontalPadding == 60,
+                     "A tall capture with the same shorter side keeps the padding")
+        style.adaptsToImage = false
+        precondition(style.adapted(toPixels: CGSize(width: 2000, height: 1200)) == style, "Off keeps the style as set")
+        style.adaptsToImage = nil; style.referenceSize = nil
+        precondition(style.adapted(toPixels: CGSize(width: 2000, height: 1200)) == style, "Styles saved before this keep their values")
+        print("Passed background checks: dimensions/orientation, zero padding, rounded corners, border pixels, custom image fill, export limits, preference restoration, watermark, size fitting")
     }
 
     static func checkPreferences() throws {

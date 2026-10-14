@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">Snapok</h1>
-<p align="center">Capture, annotate, and frame screenshots on macOS.</p>
+<p align="center">Capture, annotate, and frame screenshots on macOS — and ask Snapok Agent to redact, mark up, or translate them.</p>
 <p align="center"><a href="https://snapok.app">snapok.app</a> · <a href="https://github.com/thinkany-ai/snapok/issues">Report an issue</a></p>
 
 [![macOS packages](https://github.com/thinkany-ai/snapok/actions/workflows/macos.yml/badge.svg?branch=dev)](https://github.com/thinkany-ai/snapok/actions/workflows/macos.yml)
@@ -11,29 +11,33 @@
 ![Swift 6](https://img.shields.io/badge/Swift-6-orange)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 
+![Snapok Agent redacting the avatars, names, and phone number in a chat screenshot](docs/snapok-agent.webp)
+
 Snapok is a native screenshot utility built with Swift and AppKit. Its main window is a library of your past screenshots. Close that window to hide the Dock icon; Snapok stays in the menu bar, and the global hotkey keeps working.
 
 > Early development: builds from `dev` are previews, not stable releases. The app follows the system language (English or Simplified Chinese) by default; Settings → General → Language can pin either one (applies immediately).
 
 ## Features
 
+- **Snapok Agent:** ask about a screenshot or describe a change in plain words. Redaction, boxes, arrows, text, step numbers, erasing, and translation are done on your Mac with Snapok's own tools; edits that need an image model (new backgrounds, removing objects, redrawing) run in the cloud and stream their progress.
+- **First-run guide:** turns on Screen Recording and Accessibility, picks a free capture shortcut (⌃⌘A, else ⌥⌘A, else ⇧⌘A), and walks through a first capture.
 - **Capture any region:** drag a selection, click a window, or hover over accessible UI components to select them. Detect the Dock, menu bar, and status items as well. Scroll through parent regions; hold Option to select the whole window or system UI container.
 - **Customize the selection frame:** choose a color, thickness (1–10 px), and solid, dashed, or dotted borders in Settings → General → Screenshot selection. Preview changes immediately; preferences apply to the next capture and stay out of exported images.
 - **Scrolling capture:** capture a long page, chat, or document in one image. Scroll inside the selected area yourself, or let Snapok scroll it; fixed toolbars and input bars appear once.
-- **Annotate:** rectangle, ellipse, arrow, pen, text, and mosaic, with adjustable sizes and colors. Move, restyle, delete, and undo annotations.
+- **Annotate:** rectangle, ellipse, arrow, pen, text, mosaic (pixelate, blur, frosted glass, or a solid box), and **Erase** (E), which fills an area with the surrounding background. Adjust sizes and colors; move, restyle, delete, and undo annotations.
 - **Edit images:** keep annotations editable after capture, add desktop wallpaper, gradients, a solid color, or a custom background image. Zoom with the canvas controls or a trackpad pinch, scroll to move around long images, and use `⌘+` / `⌘−` to zoom or `⌘0` to fit the image to the window.
 - **Frame screenshots:** adjust horizontal and vertical padding, border width and color, corner radius, and shadow with a live preview.
   The Gradient background offers six presets and editable start/end colors with an angle from 0–360°. Compact color swatches open an anchored native color popover. Custom gradients are remembered and saved with library entries.
 - **Number tutorial steps:** choose **Step Number** (N) in the capture overlay or image editor, then click to place sequential circular numbered markers. Adjust their color and size, move or delete them, and undo placements. Each image starts at 1; reopened images continue from their highest existing step number.
   Choose filled circles, outlined circles, or rounded squares. With the rectangle tool (R), enable **Number boxes** to place an automatic number inside each rectangle's upper-left corner. Numbered boxes and independent markers share one sequence; box numbers move and delete with their box. Both modes preserve number styles in the library.
-- **Reuse editing styles:** enable **Use the last image editing style for new screenshots** in General settings to apply the last background, padding, border, corners, and shadow directly when copying, saving, or pinning a capture. This is off by default; annotations are never reused. Library entries retain their own style and editable original.
+- **Paste with style:** ✓ copies the plain screenshot; within 5 minutes, ⇧⌘V pastes it framed in your last editing style (background, padding, corners, shadow, watermark). **Copy screenshots in your last editing style** in General settings swaps the two. With **Fit to screenshot size** (on by default), padding, corners, and the watermark keep their proportions on screenshots of any size.
 - **Export:** copy to the clipboard, save PNG, or pin an image above other windows. Export at the original pixel resolution.
 - **Pinned images:** drag inside to move, or drag an edge or corner to resize while keeping the image proportions. Double-click or press `Esc` to close; right-click to copy or save the original image.
 - **Inspect pixels:** view cursor coordinates and RGB values in the capture magnifier.
 - **Screenshot library:** automatically save finished captures with their annotations, browse them by day, and search by title, tag, or text inside the image. Double-click any screenshot to keep editing it; configure auto-save and retention in Settings.
 - **Choose the library folder:** Settings → General → Storage location lets you change where new screenshots are stored. The library displays the selected folder. Enable “Also copy existing screenshots” to bring previous images and editable annotations along; the original folder is preserved either way.
-- **Make it yours:** switch between Light, Dark, and System themes, choose English or Simplified Chinese, and customize the capture shortcut in General settings.
-- **AI tools:** recognize text and mask phone numbers, emails, ID numbers, and keys on-device; translate a screenshot or ask a question about it with the model of your choice (Anthropic or any OpenAI-compatible provider, with your own key); optionally name and tag new screenshots automatically.
+- **Make it yours:** switch between Light, Dark, and System themes, follow the system language or pin English or Simplified Chinese, and customize every global and toolbar shortcut.
+- **AI tools:** recognize text (copied automatically) and redact sensitive values or chat avatars and names on-device; translate a screenshot with your own model, on-device translation, or Snapok Cloud; name and tag new screenshots automatically, even without a model.
 
 ## Install
 
@@ -111,19 +115,23 @@ Select the area to capture, for example the content of a web page or a chat, the
 
 Rows that stay put while the rest scrolls, such as a toolbar or a message box, are recognized as fixed and appear once, at the top or bottom. Columns that never change, such as a chat list or sidebar inside the selection, are ignored and cropped off the result. Captures stop at 30,000 pixels. Content that changes while you scroll (animations, videos, lazy-loading placeholders) can break the alignment; scroll past it slowly or capture it separately.
 
+### Snapok Agent
+
+Open **Snapok Agent** from the sidebar, or **AI Tools → Ask Snapok Agent…** in the editor, which attaches the screenshot and fills in a request. Snapok finds text, sensitive values, avatars, and names on your Mac, and a model plans which of Snapok's tools to use: your own model from Settings → Models (free), or Snapok Cloud when you are signed in (credits). The edits are drawn locally. Only changes that need an image model are sent to the cloud agent, which streams its text and steps; a task stops after 10 minutes, and you get a notification when a long one finishes in the background.
+
 ### Image editor
 
-![Snapok image editor with a gradient background, annotation toolbar, and controls for padding, border, corner radius, and shadow](docs/background-editor-preview.png)
+![Snapok image editor with a gradient background, numbered steps, and controls for padding, border, corner radius, and shadow](docs/image-editor.webp)
 
 Use the lower toolbar to annotate and the sidebar to frame your screenshot. Choose a gradient, desktop wallpaper, solid color, or custom background image; adjust padding (0–600 px per axis), border width (0–20 px) and color, corner radius (0–80 px), and shadow with a live preview. The pointer tool selects and moves annotations. With the text tool, click the image to type directly; press Enter or click outside to finish. Drag existing text to move it, or double-click to edit it in place. Select the text tool or an existing text annotation to choose a font family, size in image pixels (px), and bold styling in the toolbar. Type a pixel size and press Enter or leave the field to apply it. The − / + buttons and scrolling over the number apply changes immediately. The selection border width in General settings uses the same control and supports 1–10 px. Out-of-range input shows the allowed range and the adjusted value. Text styles are preserved when saving, reopening, and exporting screenshots.
 
-Use **Copy Image** or **Save PNG** to export at the original pixel resolution while keeping the editor open. The **AI Tools** menu in the editor header recognizes text, masks sensitive information (undoable), translates, and answers questions about the screenshot.
+Use **Copy Image** or **Save PNG** to export at the original pixel resolution while keeping the editor open. The **AI Tools** menu in the editor header recognizes text, redacts sensitive information or chat avatars and names (undoable), translates, and opens Snapok Agent with the screenshot.
 
 Pinned images can be dragged, closed with a double-click or `Esc`, and copied or saved from their context menu.
 
 ### Screenshot library
 
-![Snapok screenshot library with daily groups, searchable image cards, and Settings beside the version at the bottom of the sidebar](docs/library-preview.png)
+![Snapok screenshot library with automatically named and tagged screenshots grouped by day](docs/library.webp)
 
 Click the Dock icon, or choose **Show Main Window** from the menu bar, to open the main window. Browse screenshots grouped by day, or use the search field to find a capture. The sidebar provides **Library** and **Take Screenshot**, with **Settings** beside the version at the bottom. Close the main window with `⌘W` or the close button to hide the Dock icon while keeping Snapok and its global hotkey running. Choose **Show Main Window** from the menu bar to reopen it and restore the Dock icon.
 
@@ -141,27 +149,27 @@ Open **Settings…** (`⌘,`) or click **Settings** beside the version at the bo
 
 - **General:** choose the interface language and theme (**System**, **Light**, or **Dark**), customize the capture shortcut, and check component snapping access. Themes apply immediately and are remembered; System follows the macOS appearance. Control auto-save, choose retention (7/30/90 days or forever), open the library folder in Finder, or clear saved screenshots.
 - **Profile:** click the avatar card to set a local avatar and nickname.
-- **Models:** configure providers and select the default model for translation, questions, and automatic naming.
-- **AI Features:** turn automatic naming on or off. Choose the target language when translating an image.
+- **Models:** configure providers and select the default model for Snapok Agent, translation, and automatic naming.
+- **AI Features:** turn automatic naming on or off, and choose whether Snapok Agent plans with your own model or Snapok Cloud.
 - **About:** view the version, updates, project links, and library and log locations.
 
 ### AI tools
 
 In **Settings → Models**, add providers with an API format (Anthropic Messages or OpenAI-compatible), base URL, API key (stored only in the Keychain), and model IDs. Presets cover Anthropic, OpenAI, OpenRouter, DeepSeek, MiniMax, Z.AI, Zhipu BigModel, and Zhipu Coding Plan. A base URL that already ends in a version segment (`/v1`, `/v3`, `/v4` …) only gets `/chat/completions` or `/messages` appended, so addresses like `https://open.bigmodel.cn/api/coding/paas/v4` work as typed. Select a default model and test a provider's connection before using it. A key from earlier builds becomes an Anthropic provider automatically.
 
-| Feature | Runs | Needs API key |
+| Feature | Runs | Needs a model or account |
 | --- | --- | --- |
 | Recognize text, search by text | On-device (Vision) | No |
-| Mask sensitive information | On-device (Vision + pattern matching) | No |
-| Translate image (text-only by default) | Vision OCR + your default text model | Yes |
-| Ask about a screenshot | Your default vision model | Yes |
-| Auto title and tags (off by default) | Your default model | Yes |
+| Redact sensitive values, avatars, and names | On-device (Vision + pattern matching) | No |
+| Translate image | Your model, else on-device translation (macOS 26), else Snapok Cloud | No (on-device) |
+| Snapok Agent | Your model or Snapok Cloud plans; Snapok's tools draw on your Mac; image generation in Snapok Cloud | Your model, or a Snapok account |
+| Auto title and tags | Your model, else Apple's on-device model, else the app name and first line of text | No |
 
-**AI Tools → Translate Image** asks for the target language, recognizes text locally, and sends numbered text blocks to the default model. A text-only model works: image input is off by default. Enable **Use visual context** only with a model that supports images; this also sends the annotated screenshot for OCR correction and context.
+**AI Tools → Translate Image ▸** picks the target language, recognizes text locally, and translates the text blocks with your default model, macOS's on-device translation (downloading the languages on first use), or Snapok Cloud. **Continue in Snapok Agent** at the bottom of the translation window opens a chat with the original and the translation, for example to redraw it in the original fonts.
 
 The translated image opens in a separate editor. Select a text block to edit its translation, font size, text/fill colors, or box dimensions; drag it to move, disable translation for individual blocks, compare with the original, undo, or reset edits. Copy or save a PNG at the original pixel dimensions. With automatic screenshot saving enabled, translated images also get their own library item; subsequent edits update that item. **Save to Library** also works when automatic saving is off. The source screenshot is preserved. Unchanged text stays intact. Background erasure uses sampled flat colors, not generative inpainting: inspect complex backgrounds and overflowing text before exporting.
 
-Image inputs use the screenshot with its current annotations, so anything already masked stays masked. Automatic naming sends every new screenshot to the API, so it stays off until you enable it.
+Image inputs use the screenshot with its current annotations, so anything already masked stays masked. Automatic naming never uses credits; it sends the screenshot only to your own model.
 
 ## Build from source
 

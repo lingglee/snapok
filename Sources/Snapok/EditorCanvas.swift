@@ -153,6 +153,7 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        if scaleSelectedAnnotation(with: event) { return }
         let multiplier: CGFloat = event.hasPreciseScrollingDeltas ? 1 : 16
         if event.modifierFlags.contains(.command) {
             setZoom(zoom * exp(event.scrollingDeltaY * multiplier / 200), around: convert(event.locationInWindow, from: nil))
@@ -161,6 +162,32 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
         } else {
             panBy(dx: event.scrollingDeltaX * multiplier, dy: -event.scrollingDeltaY * multiplier)
         }
+    }
+
+    /// Whether the current trackpad gesture began over the selected annotation, so a pan that merely passes over it
+    /// keeps panning.
+    private var scalingGesture = false
+    private var lastScaleRecord = Date.distantPast
+
+    /// Scrolling that starts over the selected annotation zooms it around its center; elsewhere it pans as before.
+    private func scaleSelectedAnnotation(with event: NSEvent) -> Bool {
+        guard activeTextField == nil, event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty,
+              let index = selectedIndex, annotations.indices.contains(index) else { scalingGesture = false; return false }
+        let over = annotations[index].rect.insetBy(dx: -8, dy: -8)
+            .contains(imagePoint(from: convert(event.locationInWindow, from: nil)))
+        if event.phase == .began || (event.phase.isEmpty && event.momentumPhase.isEmpty) { scalingGesture = over }
+        guard scalingGesture else { return false }
+        if event.phase == .ended || event.phase == .cancelled || event.momentumPhase == .ended { scalingGesture = false }
+        // Momentum after a zoom is swallowed rather than turned into a pan.
+        guard event.momentumPhase.isEmpty, abs(event.scrollingDeltaY) > 0.1,
+              let scaled = annotations[index].scaled(by: Annotation.scrollScale(event)) else { return true }
+        // One undo step per gesture (or per burst of wheel clicks).
+        if event.phase == .began || Date().timeIntervalSince(lastScaleRecord) > 0.6 { record() }
+        lastScaleRecord = Date()
+        annotations[index] = scaled
+        if scaled.kind == .text { textStyle = scaled.effectiveTextStyle }
+        changed()
+        return true
     }
 
     func imagePoint(from point: CGPoint) -> CGPoint {
@@ -467,7 +494,10 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
             default: super.keyDown(with: event)
             }
         } else if event.keyCode == UInt16(kVK_Delete) || event.keyCode == UInt16(kVK_ForwardDelete) { deleteSelected() }
-        else if event.keyCode == UInt16(kVK_Escape) { chooseTool(nil) }
+        else if event.keyCode == UInt16(kVK_Escape) {
+            // Like the capture overlay: Esc first drops the tool or selection, then closes the editor.
+            if selectedTool != nil || selectedIndex != nil { chooseTool(nil) } else { onCommand?(.cancel) }
+        }
         else { super.keyDown(with: event) }
     }
 }

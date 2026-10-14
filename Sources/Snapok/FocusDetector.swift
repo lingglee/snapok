@@ -40,6 +40,24 @@ enum FocusGeometry {
         return visible.insetBy(dx: -8, dy: -8).intersection(screen)
     }
 
+    /// Whether every edge of `a` is within `tolerance` points of the same edge of `b`.
+    static func nearlyEqual(_ a: CGRect, _ b: CGRect, tolerance: CGFloat = 8) -> Bool {
+        abs(a.minX - b.minX) <= tolerance && abs(a.maxX - b.maxX) <= tolerance
+            && abs(a.minY - b.minY) <= tolerance && abs(a.maxY - b.maxY) <= tolerance
+    }
+
+    /// Adds the next, larger region around the cursor. Each level must contain the one before it and look different
+    /// from it: a container hugging its child replaces the child, and one hugging the window is left to the window
+    /// itself, so every scroll step visibly changes the selection.
+    static func appendLevel(_ candidate: CGRect, to levels: inout [CGRect], window: CGRect) {
+        guard !nearlyEqual(candidate, window), levels.last.map({ candidate.contains($0) }) ?? true else { return }
+        if let last = levels.last, nearlyEqual(candidate, last) {
+            levels[levels.count - 1] = candidate
+        } else {
+            levels.append(candidate)
+        }
+    }
+
     static func candidate(_ frame: CGRect, in window: CGRect, at point: CGPoint) -> CGRect? {
         guard [frame.minX, frame.minY, frame.width, frame.height].allSatisfy({ $0.isFinite }) else { return nil }
         let clipped = frame.intersection(window)
@@ -78,12 +96,8 @@ actor FocusDetector {
                   !visited.contains(where: { CFEqual($0, element) }) else { break }
             visited.append(element)
             if let frame = frame(of: element, primaryHeight: primaryHeight),
-               let candidate = FocusGeometry.candidate(frame, in: target.selectionFrame, at: point),
-               candidate.width < target.selectionFrame.width - 2 || candidate.height < target.selectionFrame.height - 2 {
-                // Each subsequent candidate must contain the preceding region.
-                if !frames.contains(candidate), frames.last.map({ candidate.contains($0) }) ?? true {
-                    frames.append(candidate)
-                }
+               let candidate = FocusGeometry.candidate(frame, in: target.selectionFrame, at: point) {
+                FocusGeometry.appendLevel(candidate, to: &frames, window: target.selectionFrame)
             }
             if (attribute(element, kAXRoleAttribute) as? String) == kAXWindowRole { break }
             guard let parent = attribute(element, kAXParentAttribute), CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }

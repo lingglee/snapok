@@ -70,8 +70,11 @@ enum BackgroundRenderer {
             NSGraphicsContext.saveGraphicsState()
             let shadow = NSShadow()
             shadow.shadowColor = NSColor.black.withAlphaComponent(0.35)
-            shadow.shadowBlurRadius = 32
-            shadow.shadowOffset = CGSize(width: 0, height: -12)
+            // Sized for a ~1000 px screenshot and scaled with its shorter side, so a small crop isn't swamped and a
+            // full Retina screen still shows it.
+            let scale = min(max(min(sourceSize.width, sourceSize.height) / 1000, 0.5), 3)
+            shadow.shadowBlurRadius = 32 * scale
+            shadow.shadowOffset = CGSize(width: 0, height: -12 * scale)
             shadow.set()
             NSColor.black.setFill()
             outline.fill()

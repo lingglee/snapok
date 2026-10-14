@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Last-used editor defaults, independent of an individual screenshot.
@@ -28,6 +29,31 @@ struct BackgroundPreferences: Codable, Equatable {
     /// For one library item: shown and exported as captured, without the frame (「还原原图」).
     /// Kept with the item only; `save` never makes it the default style.
     var plain: Bool?
+    /// Pixel size of the screenshot this style was set on, so `adapted(toPixels:)` can fit it to another one.
+    var referenceSize: [Double]?
+    /// nil or true: padding, corners, and the watermark scale with the screenshot's size.
+    var adaptsToImage: Bool?
+
+    /// Scales padding, corner radius, and watermark size from the screenshot the style was set on to one of `size`
+    /// pixels, by the ratio of their shorter sides (0.4–3×), so a frame looks the same on a small crop, a full screen,
+    /// and a tall or wide capture alike. Border width stays as set. Unchanged without a reference or when adapting is off.
+    func adapted(toPixels size: CGSize) -> Self {
+        guard adaptsToImage != false, let reference = referenceSize, reference.count == 2,
+              reference[0] > 0, reference[1] > 0, size.width > 0, size.height > 0 else { return self }
+        let scale = min(max(min(size.width, size.height) / min(reference[0], reference[1]), 0.4), 3)
+        guard abs(scale - 1) > 0.01 else { return self }
+        func scaled(_ value: Int, upTo limit: Int) -> Int { min(max(Int((Double(value) * scale).rounded()), 0), limit) }
+        var value = self
+        value.horizontalPadding = scaled(horizontalPadding, upTo: 600)
+        value.verticalPadding = scaled(verticalPadding, upTo: 600)
+        value.cornerRadius = scaled(cornerRadius, upTo: 80)
+        if var watermark {
+            watermark.fontSize = scaled(watermark.fontSize, upTo: Watermark.fontSizeRange.upperBound)
+            value.watermark = watermark.normalized()
+        }
+        value.referenceSize = [size.width, size.height]
+        return value
+    }
 
     /// User-defined text stamped onto exported images.
     struct Watermark: Codable, Equatable {

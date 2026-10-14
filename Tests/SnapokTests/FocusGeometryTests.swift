@@ -10,7 +10,8 @@ struct FocusGeometryTests {
         testDockRegions()
         testSystemContainers()
         testReservedDockArea()
-        print("Passed 6 focus geometry checks")
+        testLevelsSkipLookalikes()
+        print("Passed 7 focus geometry checks")
         if CommandLine.arguments.contains("--live") {
             let targets = await WindowDetector.visibleWindowFrames()
             let systems = targets.filter(\.isSystemUI)
@@ -26,6 +27,30 @@ struct FocusGeometryTests {
                 precondition(systems.contains(where: { $0.pid == dockPID }), "Expected visible Dock from AX")
             }
         }
+    }
+
+    static func testLevelsSkipLookalikes() {
+        let window = CGRect(x: 100, y: 100, width: 1200, height: 800)
+        var levels: [CGRect] = []
+        let button = CGRect(x: 120, y: 700, width: 80, height: 24)
+        let sidebar = CGRect(x: 100, y: 100, width: 260, height: 800)
+        for frame in [
+            button,
+            CGRect(x: 118, y: 698, width: 84, height: 28),  // the button's cell: hugs it, so it replaces it
+            sidebar.insetBy(dx: 2, dy: 2),                  // sidebar content view
+            sidebar,                                        // its scroll view: same box, one level
+            CGRect(x: 100, y: 100, width: 1200, height: 796) // split view that fills the window: left to the window
+        ] {
+            FocusGeometry.appendLevel(frame, to: &levels, window: window)
+        }
+        expectEqual(levels.count, 2)
+        expectEqual(levels[0], CGRect(x: 118, y: 698, width: 84, height: 28))
+        expectEqual(levels[1], sidebar)
+        // A level must still contain the one before it.
+        FocusGeometry.appendLevel(CGRect(x: 400, y: 100, width: 500, height: 800), to: &levels, window: window)
+        expectEqual(levels.count, 2)
+        precondition(FocusGeometry.nearlyEqual(window, window.insetBy(dx: 4, dy: 4)))
+        precondition(!FocusGeometry.nearlyEqual(window, window.insetBy(dx: 20, dy: 0)))
     }
 
     static func testReservedDockArea() {
