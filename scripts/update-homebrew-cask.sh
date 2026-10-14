@@ -7,7 +7,8 @@
 # Users install with: brew install --cask thinkany-ai/tap/snapok
 #
 # Run it after publish-cdn.sh has moved latest.json, so the cask never references a package that isn't uploaded.
-# CI pushes with HOMEBREW_TAP_TOKEN (a token with contents:write on the tap); locally it uses your git credentials.
+# CI pushes with HOMEBREW_TAP_DEPLOY_KEY (a write deploy key on the tap only; see setup-homebrew-tap-key.sh);
+# locally it uses your own SSH credentials.
 # TAP_DIR=<checkout> writes into an existing checkout instead of cloning.
 set -euo pipefail
 
@@ -73,11 +74,11 @@ if [[ -n "${TAP_DIR:-}" ]]; then
   TAP="$TAP_DIR"
 else
   TAP="$WORK/tap"
-  if [[ -n "${HOMEBREW_TAP_TOKEN:-}" ]]; then
-    git clone --depth 1 "https://x-access-token:$HOMEBREW_TAP_TOKEN@github.com/$TAP_REPO.git" "$TAP"
-  else
-    git clone --depth 1 "git@github.com:$TAP_REPO.git" "$TAP"
+  if [[ -n "${HOMEBREW_TAP_DEPLOY_KEY:-}" ]]; then
+    (umask 077; printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$WORK/deploy_key")
+    export GIT_SSH_COMMAND="ssh -i $WORK/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
   fi
+  git clone --depth 1 "git@github.com:$TAP_REPO.git" "$TAP"
 fi
 
 mkdir -p "$TAP/Casks"

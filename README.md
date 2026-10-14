@@ -269,7 +269,7 @@ Signed builds from pushes are published to **https://cdn.snapok.app** (R2 bucket
 | Snapok Dev | push to `dev` | `dev/latest.json` | `dev/Snapok-Dev.dmg` |
 | Snapok | `v*` tag matching Info.plist | `latest.json` | `Snapok.dmg` |
 
-Release tags also upload `install.sh` (from `scripts/install.sh`) after `latest.json`, and then `scripts/update-homebrew-cask.sh` commits the new version and SHA-256 to `Casks/snapok.rb` in [thinkany-ai/homebrew-tap](https://github.com/thinkany-ai/homebrew-tap) using the `HOMEBREW_TAP_TOKEN` secret (skipped when it is unset; prereleases skip it too).
+Release tags also upload `install.sh` (from `scripts/install.sh`) after `latest.json`, and then `scripts/update-homebrew-cask.sh` commits the new version and SHA-256 to `Casks/snapok.rb` in [thinkany-ai/homebrew-tap](https://github.com/thinkany-ai/homebrew-tap) using the `HOMEBREW_TAP_DEPLOY_KEY` secret, a deploy key that can write only to the tap (skipped when it is unset; prereleases skip it too). Set it up once with `./scripts/setup-homebrew-tap-key.sh`.
 
 Versioned packages are uploaded first and `latest.json` last, and the feed never moves to an older build. Release prereleases (`v1.2.0-beta.1`) upload packages without changing `latest.json`. Release notes come from the annotated tag message; development notes are the commit subject.
 
