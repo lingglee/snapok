@@ -1,6 +1,16 @@
 {
   "products": [
     {
+      "id": "autojev",
+      "name": "AutoJev",
+      "url": "https://autojev.ai",
+      "icon": "https://cdn.snapok.app/products/autojev.png",
+      "summary": {
+        "en": "A local model gateway for AI agents: route Codex, Claude Code, and more to the right model.",
+        "zh": "AI 智能体的本地模型网关：一个入口接入 Codex、Claude Code 等，自动路由到合适的模型。"
+      }
+    },
+    {
       "id": "douchat",
       "name": "Douchat",
       "url": "https://douchat.ai",
