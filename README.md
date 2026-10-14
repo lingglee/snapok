@@ -28,11 +28,26 @@ Snapok is a native screenshot utility built with Swift and AppKit. Its main wind
   Choose filled circles, outlined circles, or rounded squares. With the rectangle tool (R), enable **Number boxes** to place an automatic number inside each rectangle's upper-left corner. Numbered boxes and independent markers share one sequence; box numbers move and delete with their box. Both modes preserve number styles in the library.
 - **Reuse editing styles:** enable **Use the last image editing style for new screenshots** in General settings to apply the last background, padding, border, corners, and shadow directly when copying, saving, or pinning a capture. This is off by default; annotations are never reused. Library entries retain their own style and editable original.
 - **Export:** copy to the clipboard, save PNG, or pin an image above other windows. Export at the original pixel resolution.
+- **Pinned images:** drag inside to move, or drag an edge or corner to resize while keeping the image proportions. Double-click or press `Esc` to close; right-click to copy or save the original image.
 - **Inspect pixels:** view cursor coordinates and RGB values in the capture magnifier.
 - **Screenshot library:** automatically save finished captures with their annotations, browse them by day, and search by title, tag, or text inside the image. Double-click any screenshot to keep editing it; configure auto-save and retention in Settings.
 - **Choose the library folder:** Settings → General → Storage location lets you change where new screenshots are stored. The library displays the selected folder. Enable “Also copy existing screenshots” to bring previous images and editable annotations along; the original folder is preserved either way.
 - **Make it yours:** switch between Light, Dark, and System themes, choose English or Simplified Chinese, and customize the capture shortcut in General settings.
 - **AI tools:** recognize text and mask phone numbers, emails, ID numbers, and keys on-device; translate a screenshot or ask a question about it with the model of your choice (Anthropic or any OpenAI-compatible provider, with your own key); optionally name and tag new screenshots automatically.
+
+## Install
+
+Requires macOS 14 or later (Apple Silicon or Intel). Snapok updates itself after any of these:
+
+```bash
+# Homebrew
+brew install --cask thinkany-ai/tap/snapok
+
+# Script: checks the SHA-256 and Apple notarization, then installs to /Applications
+curl -fsSL https://cdn.snapok.app/install.sh | bash
+```
+
+Or download **https://cdn.snapok.app/Snapok.dmg**, open it, and drag **Snapok.app** to **Applications**. `SNAPOK_CHANNEL=dev` makes the script install Snapok Dev instead; `SNAPOK_INSTALL_DIR` changes the destination.
 
 ## Install a development build
 
@@ -253,6 +268,8 @@ Signed builds from pushes are published to **https://cdn.snapok.app** (R2 bucket
 | --- | --- | --- | --- |
 | Snapok Dev | push to `dev` | `dev/latest.json` | `dev/Snapok-Dev.dmg` |
 | Snapok | `v*` tag matching Info.plist | `latest.json` | `Snapok.dmg` |
+
+Release tags also upload `install.sh` (from `scripts/install.sh`) after `latest.json`, and then `scripts/update-homebrew-cask.sh` commits the new version and SHA-256 to `Casks/snapok.rb` in [thinkany-ai/homebrew-tap](https://github.com/thinkany-ai/homebrew-tap) using the `HOMEBREW_TAP_TOKEN` secret (skipped when it is unset; prereleases skip it too).
 
 Versioned packages are uploaded first and `latest.json` last, and the feed never moves to an older build. Release prereleases (`v1.2.0-beta.1`) upload packages without changing `latest.json`. Release notes come from the annotated tag message; development notes are the commit subject.
 

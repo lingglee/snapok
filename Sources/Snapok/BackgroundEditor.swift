@@ -51,10 +51,12 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     private let annotationColor = NSColorWell()
     private let quickActions: [ToolbarAction] = ToolKind.allCases.map { .tool($0) } + [.undo, .pin, .save, .cancel, .done]
     private let preview: BackgroundPreview
-    /// The「打码头像与用户名」checkbox item in the AI Tools menu.
-    private weak var chatIdentityItem: NSMenuItem?
-    /// Avatars and names found by the last redaction scan of this image; nil until a scan has run.
-    private var identityBoxes: [CGRect]?
+    private var revertButton: NSButton!
+    /// 「还原原图」: this image shows and exports as captured; the default style is left alone.
+    private var showsOriginal = false
+    private let originalNote = NSTextField(wrappingLabelWithString: L(
+        "Showing the screenshot as captured, without background, padding, or corners. Click Restore Style at the top to frame it again.",
+        "当前是原始截图，没有背景、留白和圆角。点顶部的「恢复样式」可重新套用。"))
     private let backgroundPicker = NSPopUpButton()
     private let colorWell = NSColorWell()
     private let borderColorWell = NSColorWell()
@@ -62,7 +64,16 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     private let gradientEnd = NSColorWell()
     private let gradientAngle = NSSlider(value: 35, minValue: 0, maxValue: 360, target: nil, action: nil)
     private let gradientAngleLabel = NSTextField(labelWithString: "35°")
+    /// The sidebar's settings column.
+    private let controls = NSStackView()
     private let customGradientControls = NSStackView()
+    private let gradientSwatches = NSStackView()
+    private let backgroundColorRow = NSStackView()
+    private var backgroundImageButton: NSButton!
+    private let photoSwatches = NSStackView()
+    private var photoButtons: [NSButton] = []
+    /// The bundled photo shown as the image background; nil while it's an imported image.
+    private var selectedPhoto: String?
     private var gradientButtons: [NSButton] = []
     private var preferences = BackgroundPreferences.load()
     private let dimensions = NSTextField(labelWithString: "")
@@ -80,6 +91,10 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     private let watermarkEnabled = NSButton(checkboxWithTitle: L("Add watermark", "添加水印"), target: nil, action: nil)
     private let watermarkText = NSTextField(string: "")
     private let watermarkPosition = NSPopUpButton()
+    /// Where the watermark was last dragged, kept so switching back to「自定义」restores it.
+    private var watermarkCenter: CGPoint?
+    /// The single-watermark placement behind「自定义」: a saved corner preset (0–8) until it is first dragged, then custom.
+    private var watermarkSinglePosition = 8
     private let watermarkFont = NSPopUpButton()
     private let watermarkBold = NSButton(checkboxWithTitle: L("Bold", "粗体"), target: nil, action: nil)
     private let watermarkSize = NSSlider(value: 32, minValue: Double(BackgroundPreferences.Watermark.fontSizeRange.lowerBound),
@@ -107,9 +122,17 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         window.delegate = self
         buildInterface()
         restorePreferences()
+        syncOriginalMode()
         preview.onChange = { [weak self] in self?.syncTools() }
         preview.onCommand = { [weak self] action in self?.performQuickAction(action) }
         preview.onViewportChange = { [weak self] in self?.updateZoomLabel() }
+        preview.onWatermarkMove = { [weak self] center in
+            guard let self else { return }
+            self.watermarkCenter = center
+            self.watermarkSinglePosition = BackgroundPreferences.Watermark.customPosition
+            self.watermarkPosition.selectItem(withTag: BackgroundPreferences.Watermark.customPosition)
+            self.updateComposition()
+        }
         syncTools()
         updateZoomLabel()
         window.makeFirstResponder(preview)
@@ -153,10 +176,12 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         save.keyEquivalent = "s"
         save.keyEquivalentModifierMask = .command
         save.bezelColor = Brand.accent
-        let actions = NSStackView(views: [makeAIMenu(), copy, save])
+        revertButton = button(L("Revert to Original", "还原原图"), action: #selector(revertToOriginal))
+        revertButton.image = NSImage(systemSymbolName: "arrow.counterclockwise", accessibilityDescription: nil)
+        revertButton.imagePosition = .imageLeading
+        let actions = NSStackView(views: [revertButton, makeAIMenu(), copy, save])
         actions.spacing = 10
         [titleStack, actions].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; header.addSubview($0) }
-        let controls = NSStackView()
         controls.orientation = .vertical
         controls.alignment = .leading
         controls.spacing = 16
@@ -194,12 +219,21 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
             controls.addArrangedSubview(view)
             view.widthAnchor.constraint(equalTo: controls.widthAnchor).isActive = true
         }
+        originalNote.font = .systemFont(ofSize: 13)
+        originalNote.textColor = .secondaryLabelColor
+        originalNote.isHidden = true
+        add(originalNote)
         add(label(L("Background", "背景"), size: 14, weight: .semibold))
-        backgroundPicker.addItems(withTitles: [L("Gradient", "渐变"), L("Desktop Wallpaper", "当前桌面壁纸"), L("Solid Color", "纯色"), L("Custom Image", "自定义图片")])
+        // Tags are the saved background types, so the menu order can differ from them.
+        for (title, type) in [(L("Gradient", "渐变"), 0), (L("Solid Color", "纯色"), 2),
+                              (L("Desktop Wallpaper", "当前桌面壁纸"), 1), (L("Custom Image", "自定义图片"), 3)] {
+            backgroundPicker.addItem(withTitle: title)
+            backgroundPicker.lastItem?.tag = type
+        }
         backgroundPicker.target = self
         backgroundPicker.action = #selector(changeBackground)
         add(backgroundPicker)
-        let swatches = NSStackView()
+        let swatches = gradientSwatches
         swatches.orientation = .vertical
         swatches.spacing = 8
         let presetNames = [L("Berry Pink", "莓粉"), L("Coastal Blue", "海岸蓝"), L("Twilight Purple", "暮光紫"), L("Sunrise", "日出"), L("Mint", "薄荷"), L("Peach", "蜜桃")]
@@ -251,13 +285,39 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         customGradientControls.addArrangedSubview(gradientDirection)
         gradientDirection.widthAnchor.constraint(equalTo: customGradientControls.widthAnchor).isActive = true
         add(customGradientControls)
-        let importButton = button(L("Choose Background Image…", "选择背景图片…"), action: #selector(importBackground))
-        add(importButton)
+        photoSwatches.orientation = .vertical
+        photoSwatches.spacing = 8
+        let photos = BackgroundPhotos.all
+        for rowStart in stride(from: 0, to: photos.count, by: 3) {
+            let row = NSStackView()
+            row.spacing = 8
+            row.distribution = .fillEqually
+            for (index, photo) in photos.enumerated() where index >= rowStart && index < rowStart + 3 {
+                let swatch = NSButton(image: BackgroundPhotos.thumbnail(photo.name) ?? NSImage(), target: self, action: #selector(selectPhoto(_:)))
+                swatch.tag = index
+                swatch.isBordered = false
+                swatch.imageScaling = .scaleAxesIndependently
+                swatch.toolTip = photo.title
+                swatch.setAccessibilityLabel(photo.title)
+                swatch.heightAnchor.constraint(equalTo: swatch.widthAnchor, multiplier: 2.0 / 3.0).isActive = true
+                swatch.wantsLayer = true
+                swatch.layer?.cornerRadius = 6
+                swatch.layer?.masksToBounds = true
+                photoButtons.append(swatch)
+                row.addArrangedSubview(swatch)
+            }
+            photoSwatches.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: photoSwatches.widthAnchor).isActive = true
+        }
+        add(photoSwatches)
+        backgroundImageButton = button(L("Choose Background Image…", "选择背景图片…"), action: #selector(importBackground))
+        add(backgroundImageButton)
         colorWell.color = NSColor(srgbRed: 0.96, green: 0.90, blue: 0.94, alpha: 1)
         colorWell.target = self
         colorWell.action = #selector(changeColor)
         colorWell.setAccessibilityLabel(L("Custom background color", "自定义背景颜色"))
-        let colorRow = NSStackView(views: [label(L("Custom color", "自选颜色"), size: 12), colorWell])
+        let colorRow = backgroundColorRow
+        colorRow.setViews([label(L("Custom color", "自选颜色"), size: 12), colorWell], in: .leading)
         colorRow.spacing = 12
         add(colorRow)
         add(label(L("Padding", "留白"), size: 14, weight: .semibold))
@@ -286,17 +346,9 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         feedback.font = .systemFont(ofSize: 11)
         feedback.textColor = .secondaryLabelColor
         add(feedback)
-        controls.setCustomSpacing(24, after: colorRow)
     }
 
     // MARK: Watermark
-
-    private static let watermarkPositionTitles = [
-        L("Top left", "左上"), L("Top", "顶部居中"), L("Top right", "右上"),
-        L("Left", "左侧居中"), L("Center", "正中"), L("Right", "右侧居中"),
-        L("Bottom left", "左下"), L("Bottom", "底部居中"), L("Bottom right", "右下"),
-        L("Tiled", "平铺满图")
-    ]
 
     private func makeWatermarkControls() -> NSView {
         let container = NSStackView()
@@ -326,7 +378,12 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         watermarkText.setAccessibilityLabel(L("Watermark text", "水印文字"))
         _ = row(L("Text", "文字"), [watermarkText])
 
-        watermarkPosition.addItems(withTitles: Self.watermarkPositionTitles)
+        // Tags are saved positions; corner presets from older settings still render and show as「自定义」.
+        for (title, position) in [(L("Custom (drag in preview)", "自定义（在预览中拖动）"), BackgroundPreferences.Watermark.customPosition),
+                                  (L("Tiled", "平铺满图"), BackgroundWatermark.Position.tiled.rawValue)] {
+            watermarkPosition.addItem(withTitle: title)
+            watermarkPosition.lastItem?.tag = position
+        }
         watermarkPosition.target = self
         watermarkPosition.action = #selector(changeWatermark)
         watermarkPosition.setAccessibilityLabel(L("Watermark position", "水印位置"))
@@ -395,7 +452,9 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
             fontSize: watermarkSize.integerValue,
             color: Self.components(watermarkColor.color),
             opacity: watermarkOpacity.doubleValue / 100,
-            position: max(watermarkPosition.indexOfSelectedItem, 0)
+            position: watermarkPosition.selectedTag() == BackgroundWatermark.Position.tiled.rawValue
+                ? BackgroundWatermark.Position.tiled.rawValue : watermarkSinglePosition,
+            center: watermarkCenter.map { [$0.x, $0.y] }
         ).normalized()
     }
 
@@ -403,7 +462,11 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         let value = (preferences.watermark ?? .init()).normalized()
         watermarkEnabled.state = value.enabled ? .on : .off
         watermarkText.stringValue = value.text
-        watermarkPosition.selectItem(at: value.position)
+        let tiled = BackgroundWatermark.Position.tiled.rawValue
+        watermarkSinglePosition = value.position != tiled ? value.position
+            : value.center != nil ? BackgroundPreferences.Watermark.customPosition : 8
+        watermarkPosition.selectItem(withTag: value.position == tiled ? tiled : BackgroundPreferences.Watermark.customPosition)
+        watermarkCenter = value.center.map { CGPoint(x: $0[0], y: $0[1]) }
         if let family = value.fontFamily, let index = fontFamilies.firstIndex(of: family) {
             watermarkFont.selectItem(at: index + 2)
         } else { watermarkFont.selectItem(at: 0) }
@@ -453,7 +516,8 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         let tools = NSStackView()
         tools.spacing = 6
         let select = NSButton(image: NSImage(systemSymbolName: "cursorarrow", accessibilityDescription: L("Select and move annotations", "选择和移动标注"))!, target: self, action: #selector(selectAnnotation))
-        select.toolTip = L("Select and move (V) · Double-click to edit text · Delete to remove", "选择和移动标注（V）· 双击编辑文字 · Delete 删除")
+        let selectKey = ToolShortcuts.hotKey(for: ToolShortcuts.select).key
+        select.toolTip = L("Select and move (\(selectKey)) · Double-click to edit text · Delete to remove", "选择和移动标注（\(selectKey)）· 双击编辑文字 · Delete 删除")
         select.bezelStyle = .rounded
         select.widthAnchor.constraint(equalToConstant: 32).isActive = true
         tools.addArrangedSubview(select)
@@ -493,7 +557,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         stepStylePicker.setAccessibilityLabel(L("Number style", "编号样式"))
         numberRect.target = self
         numberRect.action = #selector(changeNumberRect)
-        mosaicStylePicker.addItems(withTitles: MosaicStyle.allCases.map(\.title))
+        mosaicStylePicker.addItems(withTitles: MosaicStyle.mosaicStyles.map(\.title))
         mosaicStylePicker.target = self
         mosaicStylePicker.action = #selector(changeMosaicStyle)
         mosaicStylePicker.setAccessibilityLabel(L("Mosaic style", "马赛克样式"))
@@ -572,7 +636,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         preview.applyStyle()
     }
     @objc private func changeMosaicStyle() {
-        let style = MosaicStyle.allCases[max(0, mosaicStylePicker.indexOfSelectedItem)]
+        let style = MosaicStyle.mosaicStyles[max(0, mosaicStylePicker.indexOfSelectedItem)]
         preview.mosaicStyle = style
         MosaicStyle.current = style
         preview.applyStyle()
@@ -591,7 +655,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         numberRect.isHidden = !preview.usesRectStyle
         numberRect.state = preview.autoNumberRect ? .on : .off
         mosaicStylePicker.isHidden = !preview.usesMosaicStyle
-        mosaicStylePicker.selectItem(at: MosaicStyle.allCases.firstIndex(of: preview.mosaicStyle) ?? 0)
+        mosaicStylePicker.selectItem(at: MosaicStyle.mosaicStyles.firstIndex(of: preview.mosaicStyle) ?? 0)
         toolbarHeight?.constant = preview.usesStepStyle || preview.usesRectStyle || preview.usesMosaicStyle ? 154 : 126
         stepStylePicker.selectItem(at: StepMarkerStyle.allCases.firstIndex(of: preview.stepStyle) ?? 0)
         textControls.update(preview.textStyle, pixelScale: preview.pixelScale)
@@ -646,6 +710,12 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     }
 
     @objc private func updateComposition() {
+        guard !showsOriginal else {
+            preview.composition = .plain
+            savePreferences()
+            refresh()
+            return
+        }
         preview.composition = BackgroundLayout(horizontalPadding: CGFloat(sliders[0].integerValue),
                                                verticalPadding: CGFloat(sliders[1].integerValue),
                                                cornerRadius: CGFloat(sliders[3].integerValue), shadow: shadowButton.state == .on,
@@ -655,27 +725,40 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         refresh()
     }
 
+    @objc private func selectPhoto(_ sender: NSButton) {
+        let name = BackgroundPhotos.all[sender.tag].name
+        guard let photo = BackgroundPhotos.image(name) else { return }
+        customImage = photo
+        selectedPhoto = name
+        backgroundPicker.selectItem(withTag: 3)
+        changeBackground()
+    }
+
     @objc private func selectPreset(_ sender: NSButton) {
         selectedGradient = sender.tag
         usesCustomGradient = false
         restorePresetControls()
-        backgroundPicker.selectItem(at: 0)
+        backgroundPicker.selectItem(withTag: 0)
         changeBackground()
     }
 
     @objc private func changeBackground() {
-        let index = backgroundPicker.indexOfSelectedItem
+        let index = backgroundPicker.selectedTag()
         switch index {
         case 0: preview.background = usesCustomGradient ? customGradientBackground() : .gradient(selectedGradient)
         case 1:
             guard let wallpaper else {
-                backgroundPicker.selectItem(at: selectedBackground == 4 ? 0 : selectedBackground)
+                backgroundPicker.selectItem(withTag: selectedBackground == 4 ? 0 : selectedBackground)
                 operationFeedback.showError(L("Unable to read the desktop wallpaper. Choose a local background image.", "无法读取当前壁纸，请选择本地背景图片。"), in: window)
                 return
             }
             preview.background = .image(wallpaper)
         case 2: preview.background = .color(colorWell.color)
         case 3:
+            if customImage == nil, let first = BackgroundPhotos.all.first, let photo = BackgroundPhotos.image(first.name) {
+                customImage = photo
+                selectedPhoto = first.name
+            }
             guard let customImage else { importBackground(); return }
             preview.background = .image(customImage)
         default: preview.background = customGradientBackground()
@@ -693,7 +776,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     @objc private func changeCustomGradient() {
         gradientAngle.integerValue = Int(gradientAngle.doubleValue.rounded())
         usesCustomGradient = true
-        backgroundPicker.selectItem(at: 0)
+        backgroundPicker.selectItem(withTag: 0)
         changeBackground()
     }
 
@@ -705,16 +788,34 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     }
 
     private func syncGradientControls() {
-        customGradientControls.isHidden = selectedBackground != 0 && selectedBackground != 4
+        // Show only the options for the chosen background type.
+        let isGradient = selectedBackground == 0 || selectedBackground == 4
+        let options: [(NSView, Bool)] = [
+            (gradientSwatches, isGradient), (customGradientControls, isGradient),
+            (photoSwatches, selectedBackground == 3), (backgroundImageButton, selectedBackground == 3),
+            (backgroundColorRow, selectedBackground == 2)
+        ]
+        for (view, visible) in options {
+            view.isHidden = !visible
+            controls.setCustomSpacing(NSStackView.useDefaultSpacing, after: view)
+        }
+        controls.setCustomSpacing(NSStackView.useDefaultSpacing, after: backgroundPicker)
+        let lastOption = options.last(where: { $0.1 })?.0 ?? backgroundPicker
+        controls.setCustomSpacing(24, after: lastOption)
         gradientAngleLabel.stringValue = "\(gradientAngle.integerValue)°"
         for button in gradientButtons {
             button.layer?.borderWidth = selectedBackground == 0 && button.tag == selectedGradient ? 2 : 0
             button.layer?.borderColor = Brand.accent.cgColor
         }
+        for button in photoButtons {
+            let selected = selectedBackground == 3 && selectedPhoto == BackgroundPhotos.all[button.tag].name
+            button.layer?.borderWidth = selected ? 2 : 0
+            button.layer?.borderColor = Brand.accent.cgColor
+        }
     }
 
     @objc private func changeColor() {
-        backgroundPicker.selectItem(at: 2)
+        backgroundPicker.selectItem(withTag: 2)
         changeBackground()
     }
 
@@ -728,16 +829,17 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self else { return }
             guard response == .OK, let url = panel.url else {
-                self.backgroundPicker.selectItem(at: self.selectedBackground == 4 ? 0 : self.selectedBackground)
+                self.backgroundPicker.selectItem(withTag: self.selectedBackground == 4 ? 0 : self.selectedBackground)
                 return
             }
             guard let image = NSImage(contentsOf: url), image.isValid,
                   image.size.width > 0, image.size.height > 0 else {
-                self.backgroundPicker.selectItem(at: self.selectedBackground == 4 ? 0 : self.selectedBackground)
+                self.backgroundPicker.selectItem(withTag: self.selectedBackground == 4 ? 0 : self.selectedBackground)
                 self.operationFeedback.showError(L("Unable to read this image. Choose a PNG, JPEG, or HEIC file.", "无法读取这张图片，请选择 PNG、JPEG 或 HEIC。"), in: window)
                 return
             }
             self.customImage = image
+            self.selectedPhoto = nil
             self.preferences.customImagePath = url.path
             // Keep a local copy so the preference survives moving the imported file.
             if let data = image.tiffRepresentation {
@@ -751,18 +853,24 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
                     log("editor background persistence failed", error: error)
                 }
             }
-            self.backgroundPicker.selectItem(at: 3)
+            self.backgroundPicker.selectItem(withTag: 3)
             self.changeBackground()
         }
     }
 
     private func restorePreferences() {
+        showsOriginal = preferences.plain == true
         selectedGradient = min(max(preferences.gradient, 0), EditorBackground.palettes.count - 1)
         selectedBackground = preferences.backgroundType
         usesCustomGradient = preferences.backgroundType == 4 || preferences.usesCustomGradient == true
-        if let path = preferences.customImagePath { customImage = NSImage(contentsOfFile: path) }
+        if let name = preferences.backgroundPhoto, let photo = BackgroundPhotos.image(name) {
+            customImage = photo
+            selectedPhoto = name
+        } else if let path = preferences.customImagePath {
+            customImage = NSImage(contentsOfFile: path)
+        }
         // Keep last-used image defaults independent of the lifetime of a library item.
-        if let customImage, let data = customImage.tiffRepresentation {
+        if selectedPhoto == nil, let customImage, let data = customImage.tiffRepresentation {
             let url = AppChannel.supportDirectory.appendingPathComponent("EditorBackground.tiff")
             if preferences.customImagePath != url.path {
                 do {
@@ -789,7 +897,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         }
         shadowButton.state = preferences.shadow ? .on : .off
         restoreWatermark()
-        backgroundPicker.selectItem(at: selectedBackground == 4 ? 0 : selectedBackground)
+        backgroundPicker.selectItem(withTag: selectedBackground == 4 ? 0 : selectedBackground)
         switch selectedBackground {
         case 1: preview.background = .image(wallpaper!)
         case 2: preview.background = .color(colorWell.color)
@@ -805,6 +913,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         preferences.backgroundType = selectedBackground
         preferences.gradient = selectedGradient
         preferences.usesCustomGradient = usesCustomGradient
+        preferences.backgroundPhoto = selectedPhoto
         preferences.customGradient = .init(start: Self.components(gradientStart.color), end: Self.components(gradientEnd.color), angle: gradientAngle.doubleValue)
         preferences.horizontalPadding = sliders[0].integerValue
         preferences.verticalPadding = sliders[1].integerValue
@@ -814,6 +923,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         preferences.backgroundColor = Self.components(colorWell.color)
         preferences.borderColor = Self.components(borderColorWell.color)
         preferences.watermark = watermarkSettings
+        preferences.plain = showsOriginal ? true : nil
         preferences.save()
     }
 
@@ -863,6 +973,31 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
 
     // MARK: AI tools
 
+    /// Toggles 「还原原图」: back to the screenshot as captured (annotations cleared, ⌘Z restores them, and no frame for
+    /// this image only), or framed again in the style panel's settings.
+    @objc private func revertToOriginal() {
+        if !showsOriginal { preview.removeAllAnnotations() }
+        showsOriginal.toggle()
+        syncOriginalMode()
+        updateComposition()
+        window?.makeFirstResponder(preview)
+    }
+
+    private func syncOriginalMode() {
+        revertButton.title = showsOriginal ? L("Restore Style", "恢复样式") : L("Revert to Original", "还原原图")
+        revertButton.image = NSImage(systemSymbolName: showsOriginal ? "paintpalette" : "arrow.counterclockwise", accessibilityDescription: nil)
+        revertButton.toolTip = showsOriginal
+            ? L("Frame this image again with the background and padding on the right.", "用右侧的背景、留白等样式重新装饰这张图。")
+            : L("Remove all annotations and the background, back to the screenshot as captured. ⌘Z brings the annotations back; your default style doesn't change.",
+                "清除所有标注和背景，回到截图时的样子；标注可用 ⌘Z 撤回，默认样式不受影响。")
+        // The style controls don't apply to the plain screenshot, so they step aside for a note.
+        for view in controls.arrangedSubviews where view !== dimensions && view !== feedback {
+            view.isHidden = showsOriginal && view !== originalNote
+        }
+        originalNote.isHidden = !showsOriginal
+        if !showsOriginal { syncGradientControls() }
+    }
+
     private func makeAIMenu() -> NSPopUpButton {
         let menu = NSPopUpButton(frame: .zero, pullsDown: true)
         menu.controlSize = .large
@@ -878,17 +1013,26 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
             return item
         }
         _ = add(L("Recognize Text", "识别文字"), "text.viewfinder", #selector(recognizeText))
-        _ = add(L("Redact Sensitive Info, Avatars & Names", "敏感信息打码（含头像、用户名）"), "eye.slash", #selector(redactSensitive))
-        let toggle = add(L("Redact Avatars & User Names", "打码头像与用户名"), nil, #selector(toggleChatIdentity), indent: 1)
-        toggle.state = AppSettings.redactChatIdentity ? .on : .off
-        toggle.toolTip = L("Checked: avatars and user names are masked too. Unchecked: they are restored.",
-                           "勾选：头像和用户名一起打码；取消勾选：恢复头像和用户名")
-        chatIdentityItem = toggle
-        _ = add(L("Remove Automatic Redaction", "取消全部自动打码"), nil, #selector(clearAutoRedaction), indent: 1)
+        _ = add(L("Redact Sensitive Info", "打码敏感信息"), "eye.slash", #selector(redactSensitive))
+            .toolTip = L("Phone numbers, emails, ID numbers, and keys", "手机号、邮箱、证件号、密钥")
+        _ = add(L("Redact Avatars & Names", "打码头像和昵称"), "person.crop.circle.badge.xmark", #selector(redactIdentity))
+            .toolTip = L("For chat screenshots", "适用于聊天截图")
         menu.menu?.addItem(.separator())
-        _ = add(L("Translate Image", "翻译图片"), "character.bubble", #selector(translateText))
-        _ = add(L("Ask a Question…", "提问…"), "questionmark.bubble", #selector(askQuestion))
-        menu.toolTip = L("Recognition and redaction run locally. Translation and questions send the screenshot to the AI service.", "文字识别和打码在本机完成；翻译和提问会把截图发送给 AI 服务")
+        // One click per language, no dialog; on-device translation works without a model or account.
+        menu.addItem(withTitle: L("Translate Image", "翻译图片"))
+        let translate = menu.lastItem!
+        translate.image = NSImage(systemSymbolName: "character.bubble", accessibilityDescription: nil)
+        let languages = NSMenu()
+        for target in TranslationTargets.all.map(\.name) {
+            let item = languages.addItem(withTitle: target, action: #selector(translateText(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = target
+            item.state = target == AppSettings.lastTranslationTarget ? .on : .off
+        }
+        translate.submenu = languages
+        _ = add(L("Ask Snapok Agent…", "问 Snapok Agent…"), "sparkles", #selector(askAgent))
+        menu.toolTip = L("Recognition and redaction run on this Mac. Translating and Snapok Agent send the screenshot to your model or Snapok Cloud.",
+                         "文字识别和打码在本机完成；翻译和 Snapok Agent 会把截图发送给你配置的模型或 Snapok 云端")
         return menu
     }
 
@@ -902,7 +1046,7 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     @objc private func recognizeText() {
         Telemetry.capture("ai_used", ["feature": "ocr"])
         guard let image = annotatedSource else { return }
-        AIResultWindowController.show(title: L("Recognized Text", "识别出的文字"), near: window) {
+        AIResultWindowController.show(title: L("Recognized Text", "识别出的文字"), markdown: false, near: window) {
             let text = await TextScanner.scan(image).text
             return text.isEmpty ? L("No text recognized.", "没有识别到文字。") : text
         }
@@ -921,69 +1065,37 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         }
     }
 
-    /// Scans once, then masks right away: sensitive values always, avatars and names only while the toggle is checked.
-    /// Running it again replaces the previous automatic masks instead of stacking new ones.
+    /// Masks phone numbers, emails, ID numbers and keys. Running it again replaces its previous masks.
     @objc private func redactSensitive() {
         Telemetry.capture("ai_used", ["feature": "redact"])
-        operationFeedback.show(L("Finding sensitive information, avatars, and user names…", "正在查找敏感信息、头像和用户名…"), in: window, success: false)
+        operationFeedback.show(L("Finding sensitive information…", "正在查找敏感信息…"), in: window, success: false)
+        let source = preview.source
+        Task { @MainActor in
+            let boxes = await TextScanner.scan(source).sensitiveBoxes
+            preview.replaceAutoRedaction(removing: [.sensitive], adding: masks(boxes, .sensitive))
+            operationFeedback.show(boxes.isEmpty
+                ? L("No phone numbers, emails, ID numbers, or keys found.", "没有发现手机号、邮箱、证件号或密钥。")
+                : Self.redactionSummary(values: boxes.count, avatars: 0, names: 0), in: window)
+        }
+    }
+
+    /// Masks chat avatars and the user names beside them. Running it again replaces its previous masks.
+    @objc private func redactIdentity() {
+        Telemetry.capture("ai_used", ["feature": "redact_identity"])
+        operationFeedback.show(L("Finding avatars and user names…", "正在查找头像和昵称…"), in: window, success: false)
         let source = preview.source
         Task { @MainActor in
             let scan = await TextScanner.scan(source)
             let chat = await ChatRedactor.detect(image: source, blocks: scan.blocks)
             let candidates = RedactionCandidates.make(sensitive: scan.sensitiveBoxes, avatars: chat.avatars,
                                                       names: chat.names, blocks: scan.blocks)
-            let identity = AutoRedaction.identityBoxes(candidates)
-            identityBoxes = identity
-            let includeIdentity = AppSettings.redactChatIdentity
-            let added = masks(scan.sensitiveBoxes, .sensitive) + (includeIdentity ? masks(identity, .chatIdentity) : [])
-            preview.replaceAutoRedaction(removing: [.sensitive, .chatIdentity], adding: added)
-            let avatars = RedactionCandidates.count(candidates, .avatar), names = RedactionCandidates.count(candidates, .name)
-            guard !added.isEmpty else {
-                operationFeedback.show(identity.isEmpty
-                    ? L("No sensitive information, chat avatars, or user names found.", "没有发现手机号、邮箱、证件号、密钥，也没有识别到聊天头像和用户名。")
-                    : L("Found \(avatars) avatars and \(names) user names. Check「Redact Avatars & User Names」to mask them.",
-                        "识别到 \(avatars) 个头像、\(names) 个用户名；勾选「打码头像与用户名」即可打码。"), in: window)
-                return
-            }
-            var message = Self.redactionSummary(values: scan.sensitiveBoxes.count,
-                                                 avatars: includeIdentity ? avatars : 0, names: includeIdentity ? names : 0)
-            if !includeIdentity && !identity.isEmpty {
-                message += L(" Avatars and user names were left as is.", "头像和用户名未打码（未勾选）。")
-            }
-            operationFeedback.show(message, in: window)
-        }
-    }
-
-    /// Checked: masks the avatars and names found by the last scan. Unchecked: removes only those masks, restoring the original.
-    @objc private func toggleChatIdentity() {
-        let on = !AppSettings.redactChatIdentity
-        AppSettings.redactChatIdentity = on
-        chatIdentityItem?.state = on ? .on : .off
-        if on {
-            guard let boxes = identityBoxes else {
-                operationFeedback.show(L("On. Redaction will also mask avatars and user names.", "已勾选，打码时会一并处理头像和用户名。"), in: window)
-                return
-            }
-            guard !boxes.isEmpty else {
-                operationFeedback.show(L("No avatars or user names found in this image.", "这张图里没有识别到头像和用户名。"), in: window)
-                return
-            }
+            let boxes = AutoRedaction.identityBoxes(candidates)
             preview.replaceAutoRedaction(removing: [.chatIdentity], adding: masks(boxes, .chatIdentity))
-            operationFeedback.show(L("Avatars and user names redacted.", "已打码 \(boxes.count) 处头像和用户名。"), in: window)
-        } else {
-            let removed = preview.replaceAutoRedaction(removing: [.chatIdentity], adding: [])
-            operationFeedback.show(removed > 0
-                ? L("Avatars and user names restored.", "已恢复头像和用户名。")
-                : L("Off. Redaction will leave avatars and user names as is.", "已取消勾选，打码时不处理头像和用户名。"), in: window)
+            operationFeedback.show(boxes.isEmpty
+                ? L("No chat avatars or user names found.", "没有识别到聊天头像或昵称。")
+                : Self.redactionSummary(values: 0, avatars: RedactionCandidates.count(candidates, .avatar),
+                                        names: RedactionCandidates.count(candidates, .name)), in: window)
         }
-    }
-
-    /// Removes every mask made by automatic redaction; hand-drawn mosaics stay.
-    @objc private func clearAutoRedaction() {
-        let removed = preview.replaceAutoRedaction(removing: [.sensitive, .chatIdentity], adding: [])
-        operationFeedback.show(removed > 0
-            ? L("Automatic redaction removed.", "已取消全部自动打码，图片已恢复。")
-            : L("There is no automatic redaction to remove.", "当前没有自动打码的内容。"), in: window)
     }
 
     static func redactionSummary(values: Int, avatars: Int, names: Int) -> String {
@@ -995,52 +1107,21 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
                  "已打码：\(chinese.joined(separator: "、"))。")
     }
 
-    @objc private func translateText() {
-        guard let window, let image = annotatedSource else { return }
-        let alert = NSAlert()
-        alert.messageText = L("Translate Image", "翻译图片")
-        alert.informativeText = L("Choose a language to replace text in the image. Text is sent to your configured model; the image is only sent when visual context is enabled.",
-                                 "选择目标语言，将译文放回图片原位置。默认只向模型发送文字；启用截图理解时才发送图片。")
-        let targetPicker = NSPopUpButton(frame: CGRect(x: 0, y: 0, width: 280, height: 28))
-        targetPicker.addItems(withTitles: ["简体中文", "繁體中文", "English", "日本語", "한국어", "Français", "Deutsch", "Español", "Português", "Italiano", "العربية", "Русский", "हिन्दी"])
-        targetPicker.selectItem(withTitle: AppSettings.lastTranslationTarget)
-        targetPicker.setAccessibilityLabel(L("Target language", "目标语言"))
-        let vision = NSButton(checkboxWithTitle: L("Use visual context (requires a vision model)", "结合截图理解（需要视觉模型）"), target: nil, action: nil)
-        let options = NSStackView(views: [targetPicker, vision])
-        options.orientation = .vertical
-        options.alignment = .leading
-        options.spacing = 10
-        options.frame = CGRect(x: 0, y: 0, width: 360, height: 65)
-        alert.accessoryView = options
-        alert.addButton(withTitle: L("Translate", "翻译"))
-        alert.addButton(withTitle: L("Cancel", "取消"))
-        alert.window.initialFirstResponder = targetPicker
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn, let target = targetPicker.titleOfSelectedItem else { return }
-            AppSettings.lastTranslationTarget = target
-            Telemetry.capture("ai_used", ["feature": "translate"])
-            ImageTranslationWindowController.show(image: image, target: target, useVision: vision.state == .on, near: self?.window)
-        }
+    /// Opens the translation panel for the picked language, where each block can be adjusted.
+    @objc private func translateText(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? String, let image = annotatedSource else { return }
+        sender.menu?.items.forEach { $0.state = $0 == sender ? .on : .off }
+        AppSettings.lastTranslationTarget = target
+        Telemetry.capture("ai_used", ["feature": "translate"])
+        ImageTranslationWindowController.show(image: image, target: target, useVision: false, near: window)
     }
 
-    @objc private func askQuestion() {
-        Telemetry.capture("ai_used", ["feature": "ask"])
-        guard let window, let image = annotatedSource else { return }
-        let alert = NSAlert()
-        alert.messageText = L("What would you like to ask about this screenshot?", "关于这张截图，你想问什么？")
-        alert.informativeText = L("The screenshot will be sent to the AI service.", "截图会发送给 AI 服务。")
-        let field = NSTextField(frame: CGRect(x: 0, y: 0, width: 340, height: 24))
-        field.placeholderString = L("For example: What does this error mean?", "例如：这个报错是什么意思？")
-        alert.accessoryView = field
-        alert.addButton(withTitle: L("Ask", "提问"))
-        alert.addButton(withTitle: L("Cancel", "取消"))
-        alert.window.initialFirstResponder = field
-        alert.beginSheetModal(for: window) { [weak self] response in
-            let question = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard response == .alertFirstButtonReturn, !question.isEmpty else { return }
-            AIResultWindowController.show(title: question, near: self?.window) {
-                try await AIAssistant.ask(question, about: image)
-            }
-        }
+    /// Opens Snapok Agent with this screenshot (and its annotations) attached.
+    private func openAgent(_ request: AgentRequest, feature: String) {
+        Telemetry.capture("ai_used", ["feature": feature])
+        guard let image = annotatedSource else { return }
+        ImageAgentEntry.open?(NSImage(cgImage: image, size: preview.sourceImage.size), request)
     }
+
+    @objc private func askAgent() { openAgent(.edit, feature: "agent_ask") }
 }

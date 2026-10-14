@@ -29,12 +29,10 @@ enum TextScanner {
                     ? a.boundingBox.midY > b.boundingBox.midY
                     : a.boundingBox.minX < b.boundingBox.minX
             }
-            var lines: [String] = []
             var boxes: [CGRect] = []
             var blocks: [RecognizedImageText] = []
             for observation in observations {
                 guard let candidate = observation.topCandidates(1).first else { continue }
-                lines.append(candidate.string)
                 blocks.append(RecognizedImageText(id: blocks.count, text: candidate.string, box: observation.boundingBox))
                 for range in SensitiveDetector.ranges(in: candidate.string) {
                     if let box = try? candidate.boundingBox(for: range)?.boundingBox {
@@ -42,8 +40,46 @@ enum TextScanner {
                     }
                 }
             }
-            return TextScan(text: lines.joined(separator: "\n"), sensitiveBoxes: boxes, blocks: blocks)
+            return TextScan(text: layout(blocks, size: CGSize(width: image.width, height: image.height)), sensitiveBoxes: boxes, blocks: blocks)
         }.value
+    }
+}
+
+extension TextScanner {
+    /// Recognized blocks as readable text: blocks on the same row joined on one line (a tab for a wide gap,
+    /// like separate columns), rows top to bottom, and a blank line where the vertical gap suggests a new paragraph.
+    /// `size` is the image's pixel size; boxes are normalized, so it turns horizontal gaps into line heights.
+    nonisolated static func layout(_ blocks: [RecognizedImageText], size: CGSize = CGSize(width: 1, height: 1)) -> String {
+        var rows: [[RecognizedImageText]] = []
+        for block in blocks.sorted(by: { $0.box.midY > $1.box.midY }) {
+            // Same row when it overlaps the row's band by at least half of the shorter height.
+            let band = rows.last?.reduce(CGRect.null) { $0.union($1.box) } ?? .null
+            if !band.isNull, min(band.maxY, block.box.maxY) - max(band.minY, block.box.minY) >= min(band.height, block.box.height) / 2 {
+                rows[rows.count - 1].append(block)
+            } else {
+                rows.append([block])
+            }
+        }
+        let heights = blocks.map(\.box.height).sorted()
+        let lineHeight = heights.isEmpty ? 0 : heights[heights.count / 2]
+        var text = ""
+        var previousBottom: CGFloat?
+        for row in rows {
+            let sorted = row.sorted { $0.box.minX < $1.box.minX }
+            let band = row.reduce(CGRect.null) { $0.union($1.box) }
+            if let previousBottom {
+                text += previousBottom - band.maxY > lineHeight * 1.2 ? "\n\n" : "\n"
+            }
+            for (index, block) in sorted.enumerated() {
+                if index > 0 {
+                    let gap = block.box.minX - sorted[index - 1].box.maxX
+                    text += gap * size.width > lineHeight * size.height * 3 ? "\t" : " "
+                }
+                text += block.text
+            }
+            previousBottom = band.minY
+        }
+        return text
     }
 }
 
@@ -291,12 +327,6 @@ enum AIAssistant {
         return ImageTranslationRenderer.blocks(from: scan.blocks, translations: translations, source: image)
     }
 
-    static func ask(_ question: String, about image: CGImage) async throws -> String {
-        let client = try AIClient.configured()
-        let system = L("You are a screenshot assistant. Answer the user's question concisely in English using the screenshot. Say when the answer cannot be determined from the image.", "你是截图助手。用户会给你一张截图和一个问题，结合截图内容用简洁的中文回答；截图里看不出答案时直接说明。")
-        return try await client.send(system: system, text: question, imagePNG: visionPNG(image), effort: "medium")
-    }
-
     static func titleAndTags(for image: CGImage, ocrText: String) async throws -> (String, [String]) {
         let client = try AIClient.configured()
         let schema: [String: Any] = [
@@ -328,15 +358,19 @@ enum AIAssistant {
             let scan = await TextScanner.scan(image)
             HistoryStore.shared.update(item.id) { $0.ocrText = scan.text }
 
-            guard AppSettings.autoName, ModelsStore.isConfigured else { return }
-            do {
-                let (title, tags) = try await titleAndTags(for: image, ocrText: scan.text)
-                HistoryStore.shared.update(item.id) {
-                    if !title.isEmpty { $0.title = title }
-                    $0.tags = tags
-                }
-            } catch {
-                log("auto naming failed", error: error)
+            guard AppSettings.autoName else { return }
+            // The user's model, else Apple's on-device model, else the app name and first line of text. Never credits:
+            // this runs on its own for every capture.
+            var named: (title: String, tags: [String])?
+            if ModelsStore.isConfigured {
+                do { named = try await titleAndTags(for: image, ocrText: scan.text) } catch { log("auto naming failed", error: error) }
+            }
+            if named == nil { named = await OnDeviceNaming.titleAndTags(ocrText: scan.text) }
+            if named == nil || named?.title.isEmpty == true { named = LocalNaming.titleAndTags(appName: item.appName, ocrText: scan.text) }
+            guard let named, !named.title.isEmpty || !named.tags.isEmpty else { return }
+            HistoryStore.shared.update(item.id) {
+                if !named.title.isEmpty { $0.title = named.title }
+                $0.tags = named.tags
             }
         }
     }
@@ -349,11 +383,14 @@ final class AIResultWindowController: NSWindowController, NSWindowDelegate {
 
     private let textView = NSTextView(usingTextLayoutManager: false)
     private var resultMarkdown = ""
+    private var rendersMarkdown = true
     private let spinner = NSProgressIndicator()
     private let status = NSTextField(labelWithString: "")
 
-    static func show(title: String, near parent: NSWindow?, work: @escaping @MainActor () async throws -> String) {
+    /// `markdown: false` shows the text as is, keeping every line break (recognized text).
+    static func show(title: String, markdown: Bool = true, near parent: NSWindow?, work: @escaping @MainActor () async throws -> String) {
         let controller = AIResultWindowController(title: title)
+        controller.rendersMarkdown = markdown
         open.append(controller)
         if let parent {
             let frame = parent.frame
@@ -432,7 +469,13 @@ final class AIResultWindowController: NSWindowController, NSWindowDelegate {
             do {
                 let text = try await work()
                 resultMarkdown = text
-                textView.textStorage?.setAttributedString(MarkdownRenderer.render(text))
+                if rendersMarkdown {
+                    textView.textStorage?.setAttributedString(MarkdownRenderer.render(text))
+                } else {
+                    textView.string = text
+                    textView.font = .systemFont(ofSize: 14)
+                    textView.textColor = .labelColor
+                }
                 status.stringValue = ""
             } catch {
                 textView.string = ""

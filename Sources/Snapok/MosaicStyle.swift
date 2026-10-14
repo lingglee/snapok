@@ -3,8 +3,12 @@ import CoreImage
 
 /// How a mosaic annotation hides what is underneath.
 /// `brush` follows the pointer like a marker; the other styles cover a dragged rectangle.
+/// `eraseBox` belongs to the Erase tool: it fills the box with the background around it, so the content disappears.
 enum MosaicStyle: String, CaseIterable, Codable, Sendable {
-    case pixelBox, blurBox, frostedBox, solidBox, brush
+    case pixelBox, blurBox, frostedBox, solidBox, brush, eraseBox
+
+    /// The styles offered by the mosaic tool; erasing has its own tool.
+    static let mosaicStyles = allCases.filter { $0 != .eraseBox }
 
     var title: String {
         switch self {
@@ -13,6 +17,7 @@ enum MosaicStyle: String, CaseIterable, Codable, Sendable {
         case .frostedBox: return L("Box · Frosted Glass", "框选 · 毛玻璃")
         case .solidBox: return L("Box · Solid Color", "框选 · 色块遮挡")
         case .brush: return L("Brush · Pixelate", "涂抹 · 像素马赛克")
+        case .eraseBox: return L("Erase", "擦除")
         }
     }
 
@@ -32,7 +37,10 @@ enum MosaicStyle: String, CaseIterable, Codable, Sendable {
 
     /// The style picked last time, so the choice survives between captures.
     static var current: MosaicStyle {
-        get { UserDefaults.standard.string(forKey: "editor.mosaicStyle").flatMap(MosaicStyle.init(rawValue:)) ?? .pixelBox }
+        get {
+            let saved = UserDefaults.standard.string(forKey: "editor.mosaicStyle").flatMap(MosaicStyle.init(rawValue:))
+            return saved.flatMap { mosaicStyles.contains($0) ? $0 : nil } ?? .pixelBox
+        }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: "editor.mosaicStyle") }
     }
 }
@@ -41,6 +49,8 @@ extension Annotation {
     /// Older annotations (and automatic redaction strokes) carry no style and stay brush strokes.
     var effectiveMosaicStyle: MosaicStyle { mosaicStyle ?? .brush }
     var isBoxMosaic: Bool { kind == .mosaic && effectiveMosaicStyle.isBox }
+    /// A mosaic whose style the mosaic tool can change; erase boxes keep theirs.
+    var isStylableMosaic: Bool { kind == .mosaic && effectiveMosaicStyle != .eraseBox }
 
     /// Switches a selected mosaic to another style, keeping the area it covers.
     /// A brush stroke becomes a box over its bounds; a box becomes a zigzag brush stroke over the box.
@@ -85,7 +95,7 @@ enum MosaicCache {
         case .blurBox, .frostedBox:
             let radius = MosaicStyle.blurRadius(style, level: level)
             return filtered(source, key: "blur-\(radius)") { blurred($0, radius: radius) }
-        case .solidBox:
+        case .solidBox, .eraseBox:
             return nil
         }
     }
@@ -93,6 +103,47 @@ enum MosaicCache {
     static func clear() {
         sourceID = nil
         images = [:]
+        eraseColors = [:]
+    }
+
+    private static var eraseColors: [String: NSColor] = [:]
+
+    /// The fill for an erase box: the median color of a thin ring just outside it.
+    /// `ring` crops the screenshot to the box plus a margin and says how many pixels wide that margin is;
+    /// it runs once per box and source.
+    static func eraseColor(for rect: CGRect, source: NSImage, ring: () -> (image: CGImage, edge: Int)?) -> NSColor {
+        if sourceID != ObjectIdentifier(source) {
+            sourceID = ObjectIdentifier(source)
+            images = [:]
+            eraseColors = [:]
+        }
+        let key = "\(rect.origin.x),\(rect.origin.y),\(rect.width),\(rect.height)"
+        if let color = eraseColors[key] { return color }
+        let color = ring().flatMap { borderColor(of: $0.image, edge: max(1, $0.edge)) } ?? .white
+        if eraseColors.count > 500 { eraseColors = [:] }
+        eraseColors[key] = color
+        return color
+    }
+
+    /// The median color of the outer `edge` pixels of an image.
+    nonisolated static func borderColor(of image: CGImage, edge: Int) -> NSColor? {
+        let width = image.width, height = image.height
+        guard width > edge * 2, height > edge * 2,
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let data = context.data else { return nil }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        let pixels = data.bindMemory(to: UInt8.self, capacity: width * height * 4)
+        var reds: [UInt8] = [], greens: [UInt8] = [], blues: [UInt8] = []
+        for y in 0..<height {
+            for x in 0..<width where x < edge || y < edge || x >= width - edge || y >= height - edge {
+                let i = (y * width + x) * 4
+                reds.append(pixels[i]); greens.append(pixels[i + 1]); blues.append(pixels[i + 2])
+            }
+        }
+        guard !reds.isEmpty else { return nil }
+        func median(_ values: [UInt8]) -> CGFloat { CGFloat(values.sorted()[values.count / 2]) / 255 }
+        return NSColor(srgbRed: median(reds), green: median(greens), blue: median(blues), alpha: 1)
     }
 
     private static func filtered(_ source: NSImage, key: String, make: (NSImage) -> NSImage?) -> NSImage? {
@@ -119,6 +170,7 @@ enum MosaicCache {
 
     /// Corner radius of a box mosaic: crisp for pixel blocks, softly rounded for the others.
     static func cornerRadius(for annotation: Annotation) -> CGFloat {
-        annotation.effectiveMosaicStyle == .pixelBox ? 0 : min(6, min(annotation.rect.width, annotation.rect.height) / 4)
+        // Erasing stays square so no original pixels peek out of the corners.
+        [.pixelBox, .eraseBox].contains(annotation.effectiveMosaicStyle) ? 0 : min(6, min(annotation.rect.width, annotation.rect.height) / 4)
     }
 }

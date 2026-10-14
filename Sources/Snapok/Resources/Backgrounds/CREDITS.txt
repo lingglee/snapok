@@ -1,0 +1,8 @@
+Background photos from Unsplash, used under the Unsplash License (https://unsplash.com/license).
+
+clouds.jpg  https://images.unsplash.com/photo-1506905925346-21bda4d32df4
+lake.jpg    https://images.unsplash.com/photo-1501785888041-af3ef285b470
+beach.jpg   https://images.unsplash.com/photo-1507525428034-b723cf961d3e
+dusk.jpg    https://images.unsplash.com/photo-1475924156734-496f6cac6ec1
+canyon.jpg  https://images.unsplash.com/photo-1509316785289-025f5b846b35
+forest.jpg  https://images.unsplash.com/photo-1441974231531-c6227db76b6e

@@ -47,7 +47,43 @@ struct HotKeyTests {
         f5.save(in: defaults, key: HotKeyAction.pin.preferenceKey)
         precondition(HotKey.saved(in: defaults, key: HotKeyAction.pin.preferenceKey, default: pinFallback) == f5)
         precondition(HotKeyAction.pin.preferenceKey != HotKeyAction.capture.preferenceKey)
+        // Paste-styled has its own key and default, and only it waits to be armed.
+        precondition(Set(HotKeyAction.allCases.map(\.preferenceKey)).count == HotKeyAction.allCases.count, "Each shortcut saves under its own key")
+        let fallbacks = HotKeyAction.allCases.map(\.defaultHotKey)
+        precondition(fallbacks.indices.allSatisfy { i in fallbacks.indices.allSatisfy { j in i == j || fallbacks[i] != fallbacks[j] } },
+                     "Default shortcuts never collide")
+        precondition(HotKeyAction.allCases.filter(\.isArmedOnly) == [.pasteStyled], "Only paste-styled is armed on demand")
+        precondition(HotKeyAction.pasteStyled.defaultHotKey.key == "V", "Paste-styled defaults to a V shortcut")
 
-        print("Passed hotkey checks: capture, ordering, validation, menu equivalents, persistence")
+        // Tool keys: one plain key each, never shared, never an editor command.
+        let toolSuite = "snapok.toolshortcut.tests.\(UUID().uuidString)"
+        let tools = UserDefaults(suiteName: toolSuite)!
+        defer { tools.removePersistentDomain(forName: toolSuite) }
+        let rect = ToolKind.rect.rawValue
+        precondition(ToolShortcuts.hotKey(for: rect, in: tools).key == "R")
+        let q = press("q", kVK_ANSI_Q, [])!
+        precondition(ToolShortcuts.change(rect, to: q, in: tools) == .changed)
+        precondition(ToolShortcuts.hotKey(for: rect, in: tools) == q)
+        precondition(ToolShortcuts.change(ToolKind.oval.rawValue, to: q, in: tools) == .conflict(rect))
+        precondition(ToolShortcuts.change(ToolShortcuts.select, to: press("o", kVK_ANSI_O, [])!, in: tools) == .conflict(ToolKind.oval.rawValue))
+        precondition(ToolShortcuts.change(rect, to: press("1", kVK_ANSI_1, [])!, in: tools) == .reserved)
+        precondition(ToolShortcuts.change(rect, to: press("x", kVK_ANSI_X, [.command])!, in: tools) == .needsPlainKey)
+        precondition(ToolShortcuts.change(rect, to: press("r", kVK_ANSI_R, [])!, in: tools) == .changed)
+        precondition(tools.dictionary(forKey: ToolShortcuts.preferenceKey)?[rect] == nil, "Default keys are not stored")
+        // Toolbar actions may use modifiers, but not ⌘C/⌘W/zoom or another slot's key.
+        let save = ToolShortcuts.Action.save.rawValue
+        precondition(ToolShortcuts.hotKey(for: save, in: tools).symbol == "⌘S")
+        let shiftCommandS = press("s", kVK_ANSI_S, [.command, .shift])!
+        precondition(ToolShortcuts.change(save, to: shiftCommandS, in: tools) == .changed)
+        precondition(ToolShortcuts.hotKey(for: save, in: tools) == shiftCommandS)
+        precondition(ToolShortcuts.change(save, to: press("c", kVK_ANSI_C, [.command])!, in: tools) == .reserved)
+        precondition(ToolShortcuts.change(save, to: press("z", kVK_ANSI_Z, [.command])!, in: tools) == .conflict(ToolShortcuts.Action.undo.rawValue))
+        precondition(ToolShortcuts.change(save, to: press("v", kVK_ANSI_V, [])!, in: tools) == .conflict(ToolShortcuts.select))
+        precondition(ToolShortcuts.change(ToolShortcuts.Action.cancel.rawValue, to: press("\u{1b}", kVK_Escape, [])!, in: tools) == .changed,
+                     "A slot can always go back to its own default")
+        ToolShortcuts.restoreDefaults(in: tools)
+        precondition(ToolShortcuts.slots.allSatisfy { ToolShortcuts.hotKey(for: $0, in: tools) == ToolShortcuts.defaultHotKey(for: $0) })
+
+        print("Passed hotkey checks: capture, ordering, validation, menu equivalents, persistence, toolbar keys")
     }
 }

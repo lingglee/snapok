@@ -4,9 +4,122 @@ extension Bundle { static var module: Bundle { .main } }
 
 @main @MainActor
 struct EditorCanvasTests {
+    /// Single-pixel stripes expose resampling that solid-color size checks miss.
+    static func testCapturePixelFidelity() {
+        let displays: [(CGRect, Int)] = [
+            (CGRect(x: 0, y: 0, width: 1512, height: 982), 2),
+            (CGRect(x: -1920, y: -98, width: 1920, height: 1080), 1),
+            (CGRect(x: 1512, y: 240, width: 1920, height: 1080), 1)
+        ]
+        for (bounds, scale) in displays {
+            let width = Int(bounds.width) * scale, height = Int(bounds.height) * scale
+            let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: width * 4, bitsPerPixel: 32)!
+            let pixels = bitmap.bitmapData!
+            for y in 0..<height {
+                for x in 0..<width {
+                    let offset = (y * width + x) * 4
+                    pixels[offset] = x.isMultiple(of: 2) ? 255 : 0
+                    pixels[offset + 1] = y.isMultiple(of: 2) ? 255 : 0
+                    pixels[offset + 2] = UInt8((x + y) % 256)
+                    pixels[offset + 3] = 255
+                }
+            }
+            let source = bitmap.cgImage!.copy(colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!)!
+            let reference = NSBitmapImageRep(cgImage: source)
+            let image = NSImage(cgImage: source, size: bounds.size)
+            for selection in [bounds, CGRect(x: bounds.minX + 17, y: bounds.minY + 31, width: 201, height: 103)] {
+                let original = ScreenCapture.crop(image: image, to: selection, desktopBounds: bounds)!
+                let rendered = ScreenCapture.render(image: image,
+                    result: CaptureResult(globalRect: selection, annotations: []), desktopBounds: bounds)!
+                let history = HistoryRenderer.render(original: original, annotations: [])!
+                for output in [original, rendered, history] {
+                    let decoded = NSBitmapImageRep(data: output.pngData!)!
+                    precondition(decoded.pixelsWide == Int(selection.width) * scale
+                                 && decoded.pixelsHigh == Int(selection.height) * scale,
+                                 "PNG must preserve native pixels on both 1080p and Retina displays")
+                    let sourceX = Int(selection.minX - bounds.minX) * scale
+                    let sourceY = Int(bounds.maxY - selection.maxY) * scale
+                    for y in [0, 1, decoded.pixelsHigh / 2, decoded.pixelsHigh - 1] {
+                        for x in 0..<min(257, decoded.pixelsWide) {
+                            let expected = reference.colorAt(x: sourceX + x, y: sourceY + y)!
+                            precondition(decoded.colorAt(x: x, y: y)!.matches(expected),
+                                         "Cropping, rendering and PNG export must keep one-pixel detail")
+                        }
+                    }
+                }
+            }
+        }
+        print("Passed native capture pixel fidelity: Retina, 1080p, offset displays, crop, render, history and PNG")
+    }
+
     static func main() throws {
         _ = NSApplication.shared
         NSApp.setActivationPolicy(.prohibited)
+        testCapturePixelFidelity()
+        // Exercise every pin resize region through AppKit's actual event handlers.
+        let pinFrame = CGRect(x: -500, y: 200, width: 320, height: 160)
+        let pin = PinnedImageWindow(image: NSImage(size: pinFrame.size), frame: pinFrame)
+        let pinView = pin.contentView as! PinnedImageView
+        for (handle, region) in PinnedImageResize.regions(in: pinView.bounds) {
+            pin.setFrame(pinFrame, display: false)
+            let start = CGPoint(x: region.midX, y: region.midY)
+            let delta = CGPoint(x: handle.affectsLeft ? -64 : handle.affectsRight ? 64 : 0,
+                                y: handle.affectsBottom ? -32 : handle.affectsTop ? 32 : 0)
+            func mouse(_ type: NSEvent.EventType, _ point: CGPoint) -> NSEvent {
+                NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0,
+                                  windowNumber: pin.windowNumber, context: nil, eventNumber: 0,
+                                  clickCount: 1, pressure: 1)!
+            }
+            pinView.mouseDown(with: mouse(.leftMouseDown, start))
+            pinView.mouseDragged(with: mouse(.leftMouseDragged, CGPoint(x: start.x + delta.x, y: start.y + delta.y)))
+            pinView.mouseUp(with: mouse(.leftMouseUp, .zero))
+            let horizontal = handle.affectsLeft || handle.affectsRight, vertical = handle.affectsTop || handle.affectsBottom
+            if horizontal && vertical {
+                // Corners scale evenly.
+                precondition(abs(pin.frame.width - 384) < 0.01 && abs(pin.frame.width / pin.frame.height - 2) < 0.01,
+                             "Corners must scale a pinned image evenly")
+            } else {
+                // Edges stretch only their own side.
+                precondition(pin.frame.width == (horizontal ? 384 : 320) && pin.frame.height == (vertical ? 192 : 160),
+                             "Edges must change only the width or the height")
+            }
+            if handle.affectsLeft { precondition(pin.frame.maxX == pinFrame.maxX) }
+            if handle.affectsRight { precondition(pin.frame.minX == pinFrame.minX) }
+            if handle.affectsTop { precondition(pin.frame.minY == pinFrame.minY) }
+            if handle.affectsBottom { precondition(pin.frame.maxY == pinFrame.maxY) }
+            let minimum = PinnedImageResize.frame(from: pinFrame, handle: handle,
+                                                  delta: CGPoint(x: -delta.x * 100, y: -delta.y * 100))
+            precondition(minimum.height == 48 && minimum.width == 96, "Dragging past the opposite edge must clamp, not flip")
+            let freeMinimum = PinnedImageResize.frame(from: pinFrame, handle: handle,
+                                                      delta: CGPoint(x: -delta.x * 100, y: -delta.y * 100), keepAspect: false)
+            precondition(freeMinimum.width >= 24 && freeMinimum.height >= 24, "A free resize must clamp, not flip")
+        }
+        // A stretched pin keeps its shape when zoomed, and ⌘0 restores the shape it was pinned at.
+        pin.setFrame(pinFrame, display: false)
+        pin.resize(to: CGRect(x: pinFrame.minX, y: pinFrame.minY, width: 320, height: 320))
+        pin.setZoom(pin.zoom * 2)
+        precondition(abs(pin.frame.width - 640) < 1 && abs(pin.frame.height - 640) < 1, "Zooming must keep a stretched shape")
+        pin.resetToActualSize()
+        precondition(abs(pin.frame.width - 320) < 1 && abs(pin.frame.height - 160) < 1, "Actual size must restore the pinned shape")
+        precondition(!PinnedImageResize.regions(in: pinView.bounds).contains { $0.1.contains(CGPoint(x: pinView.bounds.midX, y: pinView.bounds.midY)) }, "Interior dragging must still move the pin")
+        pin.close()
+        let pinSuite = "SnapokPinBorder-" + UUID().uuidString
+        let pinDefaults = UserDefaults(suiteName: pinSuite)!
+        defer { pinDefaults.removePersistentDomain(forName: pinSuite) }
+        precondition(PinBorder.load(in: pinDefaults) == PinBorder() && PinBorder().isVisible, "Pins keep a border by default")
+        var noBorder = PinBorder()
+        noBorder.width = 0
+        noBorder.save(in: pinDefaults)
+        precondition(!PinBorder.load(in: pinDefaults).isVisible, "0 px removes the border")
+        var clearBorder = PinBorder()
+        clearBorder.setColor(.clear)
+        precondition(!clearBorder.isVisible, "No color removes the border")
+        var thick = PinBorder()
+        thick.width = 99
+        thick.save(in: pinDefaults)
+        precondition(PinBorder.load(in: pinDefaults).width == PinBorder.widthRange.upperBound, "Saved widths are clamped")
         let appearanceSuite = "SnapokCaptureAppearance-" + UUID().uuidString
         let appearanceDefaults = UserDefaults(suiteName: appearanceSuite)!
         defer { appearanceDefaults.removePersistentDomain(forName: appearanceSuite) }

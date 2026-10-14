@@ -5,7 +5,7 @@
 #   CHANNEL=dev|release ./scripts/publish-cdn.sh <package.dmg> <package.zip>
 #
 # Layout (release at the root, development builds under dev/):
-#   latest.json  Snapok.dmg  Snapok-<version>.{dmg,zip}
+#   latest.json  Snapok.dmg  Snapok-<version>.{dmg,zip}  install.sh (scripts/install.sh, for curl | bash)
 #   dev/latest.json  dev/Snapok-Dev.dmg  dev/Snapok-Dev-<version>-<build>.{dmg,zip}
 #
 # Versioned packages go up first (cached forever), then the fixed download link, and latest.json last,
@@ -105,4 +105,6 @@ print(json.dumps({
 }, ensure_ascii=False, indent=2))
 PY
 upload "$MANIFEST" "${PREFIX}latest.json" "application/json; charset=utf-8" "no-store, max-age=0"
+# The curl installer reads latest.json, so it goes live with the release it installs.
+[[ "$CHANNEL" == release ]] && upload scripts/install.sh install.sh "text/plain; charset=utf-8" "public, max-age=300"
 echo "Published $APP_NAME $VERSION ($BUILD) → $CDN/${PREFIX}latest.json"

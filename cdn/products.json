@@ -1,0 +1,34 @@
+{
+  "products": [
+    {
+      "id": "spotcat",
+      "name": "Spotcat",
+      "url": "https://spotcat.ai",
+      "icon": "https://cdn.snapok.app/products/spotcat.png",
+      "summary": {
+        "en": "A fast, native macOS launcher for apps, files, the web, extensions, and AI.",
+        "zh": "快速的原生 macOS 启动器：⌥Space 打开应用、文件、网页、扩展和 AI。"
+      }
+    },
+    {
+      "id": "douchat",
+      "name": "Douchat",
+      "url": "https://douchat.ai",
+      "icon": "https://cdn.snapok.app/products/douchat.png",
+      "summary": {
+        "en": "A desktop workspace where AI agents work alone or together in group chats.",
+        "zh": "让 AI 智能体单独工作、也能在群聊里协作的桌面工作区。"
+      }
+    },
+    {
+      "id": "termany",
+      "name": "Termany",
+      "url": "https://termany.sh",
+      "icon": "https://cdn.snapok.app/products/termany.png",
+      "summary": {
+        "en": "The agent-native terminal: run many coding agents in one window.",
+        "zh": "为智能体打造的终端：一个窗口同时运行多个编程智能体。"
+      }
+    }
+  ]
+}

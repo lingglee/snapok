@@ -149,6 +149,13 @@ struct BackgroundRendererTests {
         let tiledBitmap = pixels(tiled)
         precondition(whitePixels(tiledBitmap, in: CGRect(x: 0, y: 0, width: 380, height: 260)) > 50 &&
                      whitePixels(tiledBitmap, in: CGRect(x: 380, y: 260, width: 380, height: 260)) > 50, "Tiled watermark must cover the canvas")
+        // A dragged watermark sits at its stored centre and is kept whole on the canvas.
+        var dragged = mark; dragged.position = .custom; dragged.center = CGPoint(x: 0.1, y: 0.9)
+        precondition(whitePixels(pixels(dragged), in: topLeft) > 50 && whitePixels(pixels(dragged), in: bottomRight) == 0,
+                     "Custom watermark must follow its centre")
+        dragged.center = CGPoint(x: 1, y: 0)
+        let corner = pixels(dragged)
+        precondition(whitePixels(corner, in: bottomRight) > 50, "Custom watermark at the edge must stay on the canvas")
         var faint = mark; faint.opacity = 0
         precondition(whitePixels(pixels(faint), in: bottomRight) == 0, "Zero opacity draws nothing")
         // Fonts: a named family resolves, unknown names fall back to the system font.
@@ -160,7 +167,9 @@ struct BackgroundRendererTests {
         precondition(BackgroundWatermark(preferences: .init(enabled: true, text: "   ")) == nil)
         let restored = BackgroundWatermark(preferences: .init(enabled: true, text: "© Sam", fontFamily: "Helvetica", bold: true,
                                                                fontSize: 9999, color: [2, 0, 0, 1], opacity: 5, position: 42))!
-        precondition(restored.fontSize == 400 && restored.opacity == 1 && restored.position == .tiled && restored.bold)
+        precondition(restored.fontSize == 400 && restored.opacity == 1 && restored.position == .custom && restored.bold)
+        let saved = BackgroundPreferences.Watermark(enabled: true, text: "x", position: 10, center: [0.25, 7]).normalized()
+        precondition(saved.center == [0.25, 1], "Saved centres are clamped to the canvas")
     }
 
     static func expect(_ bitmap: NSBitmapImageRep, _ x: Int, _ y: Int, _ expected: NSColor) {

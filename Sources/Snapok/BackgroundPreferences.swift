@@ -19,14 +19,20 @@ struct BackgroundPreferences: Codable, Equatable {
     var borderColor = [1.0, 1.0, 1.0, 1.0]
     var backgroundColor = [0.96, 0.90, 0.94, 1.0]
     var customImagePath: String?
+    /// A bundled photo (`BackgroundPhotos`) used as the image background; nil means the imported image.
+    var backgroundPhoto: String?
     var customGradient: CustomGradient?
     var usesCustomGradient: Bool?
     /// Optional so settings saved before watermarks existed still decode.
     var watermark: Watermark?
+    /// For one library item: shown and exported as captured, without the frame (「还原原图」).
+    /// Kept with the item only; `save` never makes it the default style.
+    var plain: Bool?
 
     /// User-defined text stamped onto exported images.
     struct Watermark: Codable, Equatable {
-        static let positionCount = 10
+        static let positionCount = 11
+        static let customPosition = 10
         static let fontSizeRange = 8...400
         static let maxTextLength = 200
         var enabled = false
@@ -37,8 +43,10 @@ struct BackgroundPreferences: Codable, Equatable {
         var fontSize = 32
         var color = [1.0, 1.0, 1.0, 1.0]
         var opacity = 0.6
-        /// 0–8: a 3×3 grid read left to right, top to bottom; 9: tiled across the canvas.
+        /// 0–8: a 3×3 grid read left to right, top to bottom; 9: tiled across the canvas; 10: dragged to `center`.
         var position = 8
+        /// For a dragged watermark: its centre as fractions of the canvas, measured from the bottom left.
+        var center: [Double]?
 
         var isVisible: Bool { enabled && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && opacity > 0 }
 
@@ -50,6 +58,7 @@ struct BackgroundPreferences: Codable, Equatable {
             value.color = BackgroundPreferences.normalized(color, fallback: Self().color)
             value.opacity = opacity.isFinite ? min(max(opacity, 0), 1) : Self().opacity
             value.position = min(max(position, 0), Self.positionCount - 1)
+            value.center = center.flatMap { $0.count == 2 && $0.allSatisfy(\.isFinite) ? $0.map { min(max($0, 0), 1) } : nil }
             return value
         }
     }
@@ -78,7 +87,9 @@ struct BackgroundPreferences: Codable, Equatable {
     }
 
     func save(in defaults: UserDefaults = .standard) {
-        if let data = try? JSONEncoder().encode(self) { defaults.set(data, forKey: Self.key) }
+        var value = self
+        value.plain = nil
+        if let data = try? JSONEncoder().encode(value) { defaults.set(data, forKey: Self.key) }
     }
 
     fileprivate static func normalized(_ color: [Double], fallback: [Double]) -> [Double] {

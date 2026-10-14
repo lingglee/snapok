@@ -77,34 +77,48 @@ final class AboutPane: SectionedPageView {
 
 /// A clickable row: colored icon tile, title, gray detail, and an "open" glyph on the right.
 @MainActor
-private final class AboutRow: NSView {
+final class AboutRow: NSView {
     private let action: () -> Void
-    private var hovering = false {
-        didSet { layer?.backgroundColor = hovering ? NSColor.labelColor.withAlphaComponent(0.04).cgColor : nil }
+    /// Hover and press fill, inset from the card's edges so it never meets the card's corners.
+    private let highlight = NSView()
+    private let open = NSImageView()
+    private var hovering = false { didSet { updateHighlight() } }
+    private var pressing = false { didSet { updateHighlight() } }
+
+    convenience init(symbol: String, tint: NSColor, title: String, subtitle: String, help: String, action: @escaping () -> Void) {
+        self.init(icon: IconTile(symbol: symbol, tint: tint), title: title, subtitle: subtitle, help: help, action: action)
     }
 
-    init(symbol: String, tint: NSColor, title: String, subtitle: String, help: String, action: @escaping () -> Void) {
+    /// `icon` sits on the left; a multi-line `subtitle` wraps instead of truncating.
+    init(icon tile: NSView, title: String, subtitle: String, help: String, wrapsSubtitle: Bool = false, action: @escaping () -> Void) {
         self.action = action
         super.init(frame: .zero)
-        wantsLayer = true
-        layer?.cornerRadius = 10
         toolTip = help
-
-        let tile = IconTile(symbol: symbol, tint: tint)
+        highlight.wantsLayer = true
+        highlight.layer?.cornerRadius = 8
+        highlight.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(highlight)
+        NSLayoutConstraint.activate([
+            highlight.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            highlight.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3),
+            highlight.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            highlight.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6)
+        ])
 
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
         let detail = NSTextField(labelWithString: subtitle)
         detail.font = .systemFont(ofSize: 12)
         detail.textColor = .secondaryLabelColor
-        detail.lineBreakMode = .byTruncatingMiddle
+        detail.lineBreakMode = wrapsSubtitle ? .byWordWrapping : .byTruncatingMiddle
+        if wrapsSubtitle { detail.maximumNumberOfLines = 2 }
         detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let text = NSStackView(views: [titleLabel, detail])
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 3
 
-        let open = NSImageView(image: NSImage(systemSymbolName: "arrow.up.forward.square", accessibilityDescription: help) ?? NSImage())
+        open.image = NSImage(systemSymbolName: "arrow.up.forward.square", accessibilityDescription: help)
         open.symbolConfiguration = .init(pointSize: 15, weight: .regular)
         open.contentTintColor = .secondaryLabelColor
 
@@ -127,12 +141,75 @@ private final class AboutRow: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    private func updateHighlight() {
+        let alpha: CGFloat = pressing ? 0.09 : hovering ? 0.05 : 0
+        highlight.layer?.backgroundColor = alpha > 0 ? NSColor.labelColor.withAlphaComponent(alpha).cgColor : nil
+        open.contentTintColor = hovering ? .controlAccentColor : .secondaryLabelColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateHighlight()
+    }
+
     override func mouseEntered(with event: NSEvent) { hovering = true }
-    override func mouseExited(with event: NSEvent) { hovering = false }
-    override func mouseDown(with event: NSEvent) {}
+    override func mouseExited(with event: NSEvent) { hovering = false; pressing = false }
+    override func mouseDown(with event: NSEvent) { pressing = true }
+    override func mouseDragged(with event: NSEvent) { pressing = bounds.contains(convert(event.locationInWindow, from: nil)) }
     override func mouseUp(with event: NSEvent) {
+        pressing = false
         if bounds.contains(convert(event.locationInWindow, from: nil)) { action() }
     }
     override func accessibilityPerformPress() -> Bool { action(); return true }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+}
+
+/// Other apps by the Snapok team, each opening its website. The list comes from `ProductCatalog`.
+@MainActor
+final class MorePane: SectionedPageView {
+    private var list: NSStackView!
+
+    init() {
+        super.init(title: L("More from Us", "周边"))
+        list = addSection(L("Our Other Apps", "我们的其他产品"), rows: [])
+        reload()
+        NotificationCenter.default.addObserver(self, selector: #selector(reload), name: ProductCatalog.didChange, object: nil)
+        ProductCatalog.shared.refresh()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    @objc private func reload() {
+        let catalog = ProductCatalog.shared
+        Self.fill(list, with: catalog.products.map { product in
+            AboutRow(icon: Self.icon(catalog.icon(for: product), name: product.name), title: product.name,
+                     subtitle: product.localizedSummary,
+                     help: L("Open \(product.name)", "打开 \(product.name)"), wrapsSubtitle: true) { NSWorkspace.shared.open(product.trackedURL) }
+        })
+    }
+
+    /// The app icon, or a tile with the name's first letter while it downloads.
+    private static func icon(_ image: NSImage?, name: String, size: CGFloat = 34) -> NSView {
+        let view: NSView
+        if let image {
+            let imageView = NSImageView(image: image)
+            imageView.imageScaling = .scaleProportionallyUpOrDown
+            view = imageView
+        } else {
+            let letter = NSTextField(labelWithString: String(name.prefix(1)).uppercased())
+            letter.font = .systemFont(ofSize: size * 0.45, weight: .semibold)
+            letter.textColor = .white
+            letter.alignment = .center
+            letter.translatesAutoresizingMaskIntoConstraints = false
+            view = NSView()
+            view.addSubview(letter)
+            NSLayoutConstraint.activate([letter.centerXAnchor.constraint(equalTo: view.centerXAnchor), letter.centerYAnchor.constraint(equalTo: view.centerYAnchor)])
+        }
+        view.wantsLayer = true
+        view.layer?.cornerRadius = size * 0.225
+        view.layer?.masksToBounds = true
+        if !(view is NSImageView) { view.layer?.backgroundColor = NSColor.systemGray.cgColor }
+        NSLayoutConstraint.activate([view.widthAnchor.constraint(equalToConstant: size), view.heightAnchor.constraint(equalToConstant: size)])
+        return view
+    }
 }

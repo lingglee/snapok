@@ -2,7 +2,7 @@ import AppKit
 import Carbon
 extension Bundle { static var module: Bundle { .main } }
 
-/// Box mosaics (pixelate / blur / frosted / solid) and the classic brush, rendered on a striped image.
+/// Box mosaics (pixelate / blur / frosted / solid / erase) and the classic brush, rendered on a striped image.
 @main @MainActor
 struct MosaicStyleTests {
     static let size = CGSize(width: 200, height: 120)   // points; rendered at 2x like a Retina capture
@@ -28,7 +28,12 @@ struct MosaicStyleTests {
             precondition(inside != region(plain, box.insetBy(dx: 7, dy: 7), outside: false), "\(style) must hide the box contents")
             insides[style] = inside
         }
-        precondition(Set(insides.values).count == 4, "Pixelate, blur, frosted and solid must render differently")
+        precondition(Set(insides.values).count == 5, "Pixelate, blur, frosted, solid and erase must render differently")
+        // Erase fills flat with the background around the box, whatever the annotation color.
+        let erased = insides[.eraseBox]!
+        precondition(stride(from: 0, to: erased.count, by: 4).allSatisfy { erased[$0..<$0 + 3] == erased[0..<3] }, "Erase fills with one color")
+        precondition(abs(Int(erased[2]) - 230) > 10, "Erase ignores the annotation color")
+        precondition(!MosaicStyle.mosaicStyles.contains(.eraseBox), "The mosaic tool does not offer erasing")
 
         // 2. Solid fills with the annotation color; pixel blocks are flat; frosted is lighter than plain blur.
         let solid = insides[.solidBox]!

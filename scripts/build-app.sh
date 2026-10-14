@@ -10,8 +10,8 @@ CHANNEL="${CHANNEL:-dev}"
 [[ "$CONFIGURATION" == release || "$CONFIGURATION" == debug ]] || { echo "Expected release or debug" >&2; exit 1; }
 [[ -z "$MODE" || "$MODE" == --universal ]] || { echo "Expected --universal" >&2; exit 1; }
 case "$CHANNEL" in
-  release) APP_NAME="Snapok"; BUNDLE_ID="ai.thinkany.snapok"; ICON="SnapokFamily" ;;
-  dev) APP_NAME="Snapok Dev"; BUNDLE_ID="ai.thinkany.snapok.dev"; ICON="SnapokFamily-Dev" ;;
+  release) APP_NAME="Snapok"; BUNDLE_ID="ai.thinkany.snapok"; ICON="SnapokFamily"; URL_SCHEME="snapok" ;;
+  dev) APP_NAME="Snapok Dev"; BUNDLE_ID="ai.thinkany.snapok.dev"; ICON="SnapokFamily-Dev"; URL_SCHEME="snapok-dev" ;;
   *) echo "CHANNEL must be dev or release" >&2; exit 1 ;;
 esac
 APP_DIR="$ROOT_DIR/dist/$APP_NAME.app"
@@ -39,7 +39,8 @@ cp Sources/Snapok/Resources/*.png "$APP_DIR/Contents/Resources/"
 cp "Resources/Brand/$ICON.png" "$APP_DIR/Contents/Resources/AppIcon.png"
 PLIST="$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" -c "Set :CFBundleName $APP_NAME" \
-  -c "Set :CFBundleDisplayName $APP_NAME" -c "Set :SnapokChannel $CHANNEL" "$PLIST"
+  -c "Set :CFBundleDisplayName $APP_NAME" -c "Set :SnapokChannel $CHANNEL" \
+  -c "Set :CFBundleURLTypes:0:CFBundleURLName $BUNDLE_ID" -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 $URL_SCHEME" "$PLIST"
 cp -R "$BIN_DIR/Snapok_Snapok.bundle" "$APP_DIR/Contents/Resources/"
 chmod +x "$APP_DIR/Contents/MacOS/Snapok"
 # Telemetry keys exist only in the project's own CI builds; builds from source leave them out and never report.

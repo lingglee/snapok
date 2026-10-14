@@ -45,11 +45,10 @@ struct HistoryTests {
         let rendered = store.rendered(for: store.item(item.id)!)
         precondition(rendered?.size == image.size, "rendered copy keeps point size")
 
-        // Reuse is opt-in; framing uses image pixels, preserving editable Retina originals.
-        let previousReuse = AppSettings.reuseEditorStyle
+        // The paste-styled shortcut frames with the last editing style; framing uses image pixels,
+        // preserving editable Retina originals.
         let previousPreferences = UserDefaults.standard.data(forKey: BackgroundPreferences.key)
         defer {
-            AppSettings.reuseEditorStyle = previousReuse
             if let previousPreferences { UserDefaults.standard.set(previousPreferences, forKey: BackgroundPreferences.key) }
             else { UserDefaults.standard.removeObject(forKey: BackgroundPreferences.key) }
         }
@@ -61,10 +60,7 @@ struct HistoryTests {
         frame.backgroundType = 2
         frame.backgroundColor = [0, 0, 1, 1]
         frame.save()
-        AppSettings.reuseEditorStyle = false
-        precondition(CaptureStyle.forNewCapture(screen: nil) == nil, "Disabled reuse must leave new screenshots unframed")
-        AppSettings.reuseEditorStyle = true
-        let reuse = CaptureStyle.forNewCapture(screen: nil)!
+        let reuse = CaptureStyle(preferences: .load())
         let framedSize = CGSize(width: 1848, height: 264)
         let annotated = HistoryRenderer.render(original: image, annotations: annotations)!
         precondition(reuse.render(annotated)?.size == framedSize, "Direct exports must add pixel padding exactly once")

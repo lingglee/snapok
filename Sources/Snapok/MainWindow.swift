@@ -1,7 +1,7 @@
 import AppKit
 import Carbon
 
-/// The main window: a sidebar with the library and a Settings entry, the library itself, and Settings as a panel on top.
+/// The main window: a sidebar with the library, Snapok Agent and a Settings entry, the selected page, and Settings as a panel on top.
 @MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     var onCapture: (() -> Void)? {
@@ -14,7 +14,17 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         didSet { library.onPin = onPin }
     }
 
+    /// Opens an image (a Snapok Agent result) in the image editor.
+    var onEditImage: ((NSImage) -> Void)? {
+        didSet { imageAgent.onEditImage = onEditImage }
+    }
+
+    private enum Page { case library, imageAgent }
+    private var page = Page.library
     private var library = LibraryPane()
+    private var imageAgent = ImageAgentPane()
+    private var libraryItem: SidebarItem?
+    private var imageAgentItem: SidebarItem?
     private let content = ContentBackground()
     private var settings: SettingsOverlay?
 
@@ -49,19 +59,49 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // The content container is reused; removing it from the root does not
         // remove its children. Detach the old page before installing its replacement.
         library.removeFromSuperview()
+        imageAgent.removeFromSuperview()
         window?.contentView?.subviews.forEach { $0.removeFromSuperview() }
         library = LibraryPane()
         library.onCapture = onCapture
         library.onOpen = onOpen
         library.onPin = onPin
+        imageAgent = ImageAgentPane()
+        imageAgent.onEditImage = onEditImage
         build()
         if let openPage { showSettings(openPage, animated: false) }
     }
 
-    /// Shows the library, closing Settings if it is open.
+    /// Shows the window on its current page, closing Settings if it is open.
     func present() {
         closeSettings()
         bringToFront()
+    }
+
+    /// Shows Snapok Agent with a new chat, optionally with `image` attached to the first message.
+    func presentImageAgent(attaching image: NSImage?, request: AgentRequest = .edit) {
+        closeSettings()
+        bringToFront()
+        show(.imageAgent)
+        imageAgent.startNewChat(attaching: image, request: request)
+    }
+
+    func presentImageAgent(chat id: String) {
+        closeSettings()
+        bringToFront()
+        show(.imageAgent)
+        imageAgent.open(chat: id)
+    }
+
+    private func show(_ page: Page) {
+        self.page = page
+        library.isHidden = page != .library
+        imageAgent.isHidden = page != .imageAgent
+        libraryItem?.isSelected = page == .library
+        imageAgentItem?.isSelected = page == .imageAgent
+        switch page {
+        case .library: window?.makeFirstResponder(library.collection)
+        case .imageAgent: imageAgent.focusComposer()
+        }
     }
 
     func presentSettings(_ page: SettingsPage) {
@@ -116,11 +156,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }, completionHandler: {
             MainActor.assumeIsolated { overlay.removeFromSuperview() }
         })
-        window?.makeFirstResponder(library.collection)
+        show(page)
     }
 
     private func build() {
         guard let root = window?.contentView else { return }
+        imageAgent.onOpenSettings = { [weak self] page in self?.showSettings(page) }
 
         let sidebar = SidebarBackground()
 
@@ -136,13 +177,27 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             brand.addArrangedSubview(ChannelBadge(text: "Dev"))
         }
 
-        let libraryItem = SidebarItem(title: L("Library", "截图库"), symbol: "photo.on.rectangle") { [weak self] in self?.present() }
-        libraryItem.isSelected = true
-        let nav = NSStackView(views: [libraryItem])
+        let libraryItem = SidebarItem(title: L("Library", "截图库"), symbol: "photo.on.rectangle") { [weak self] in
+            self?.closeSettings()
+            self?.show(.library)
+        }
+        let imageAgentItem = SidebarItem(title: "Snapok Agent", symbol: "sparkles") { [weak self] in
+            self?.closeSettings()
+            self?.show(.imageAgent)
+        }
+        self.libraryItem = libraryItem
+        self.imageAgentItem = imageAgentItem
+        // A spinner on the sidebar item while any Snapok Agent chat has a task running, seen from any page.
+        imageAgentItem.isBusy = !ImageAgentStore.shared.running.isEmpty
+        NotificationCenter.default.addObserver(forName: ImageAgentStore.didChange, object: nil, queue: .main) { [weak imageAgentItem] _ in
+            MainActor.assumeIsolated { imageAgentItem?.isBusy = !ImageAgentStore.shared.running.isEmpty }
+        }
+        let nav = NSStackView(views: [libraryItem, imageAgentItem])
         nav.orientation = .vertical
         nav.alignment = .leading
         nav.spacing = 4
         libraryItem.widthAnchor.constraint(equalTo: nav.widthAnchor).isActive = true
+        imageAgentItem.widthAnchor.constraint(equalTo: nav.widthAnchor).isActive = true
 
         let shortcut = makeShortcutCard()
         let version = NSTextField(labelWithString: L("Version ", "版本 ") + ((Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev"))
@@ -163,8 +218,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
         }
-        library.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(library)
+        for page in [library, imageAgent] as [NSView] {
+            page.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(page)
+            NSLayoutConstraint.activate([
+                page.topAnchor.constraint(equalTo: content.topAnchor),
+                page.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+                page.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                page.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+            ])
+        }
         [brand, nav, shortcut, version, settingsButton].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             sidebar.addSubview($0)
@@ -192,13 +255,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             version.trailingAnchor.constraint(lessThanOrEqualTo: settingsButton.leadingAnchor, constant: -8),
             settingsButton.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -18),
             settingsButton.centerYAnchor.constraint(equalTo: version.centerYAnchor),
-            settingsButton.heightAnchor.constraint(equalToConstant: 24),
-            library.topAnchor.constraint(equalTo: content.topAnchor),
-            library.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            library.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            library.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+            settingsButton.heightAnchor.constraint(equalToConstant: 24)
         ])
-        window?.makeFirstResponder(library.collection)
+        show(page)
     }
 
     @objc private func openSettings() {
@@ -288,7 +347,18 @@ final class SidebarItem: NSView {
     }
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
+    private let spinner = NSProgressIndicator()
     private var hovering = false
+
+    /// Shows a spinner at the trailing edge, e.g. while a Snapok Agent task runs.
+    var isBusy = false {
+        didSet {
+            guard isBusy != oldValue else { return }
+            spinner.isHidden = !isBusy
+            isBusy ? spinner.startAnimation(nil) : spinner.stopAnimation(nil)
+            setAccessibilityValue(isBusy ? L("Working", "处理中") : nil)
+        }
+    }
 
     init(title: String, symbol: String, onSelect: @escaping () -> Void) {
         self.onSelect = onSelect
@@ -303,11 +373,19 @@ final class SidebarItem: NSView {
         row.spacing = 10
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.isHidden = true
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(spinner)
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 38),
             row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             row.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 20)
+            icon.widthAnchor.constraint(equalToConstant: 20),
+            spinner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            spinner.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
         setAccessibilityRole(.button)

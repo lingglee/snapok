@@ -32,12 +32,9 @@ struct CaptureStyle {
         self.background = background
     }
 
-    static func forNewCapture(screen: NSScreen?) -> Self? {
-        AppSettings.reuseEditorStyle ? Self(preferences: .load(), screen: screen) : nil
-    }
-
     var layout: BackgroundLayout {
-        BackgroundLayout(horizontalPadding: CGFloat(preferences.horizontalPadding),
+        if preferences.plain == true { return .plain }
+        return BackgroundLayout(horizontalPadding: CGFloat(preferences.horizontalPadding),
                          verticalPadding: CGFloat(preferences.verticalPadding),
                          cornerRadius: CGFloat(preferences.cornerRadius), shadow: preferences.shadow,
                          borderWidth: CGFloat(preferences.borderWidth), borderColor: Self.color(preferences.borderColor),

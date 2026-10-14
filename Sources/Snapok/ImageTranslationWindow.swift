@@ -23,6 +23,9 @@ final class ImageTranslationWindowController: NSWindowController, NSWindowDelega
     private var copyButton: NSButton!
     private var saveButton: NSButton!
     private var retryButton: NSButton!
+    private var agentButton: NSButton!
+    /// What translated the current result, shown in the status line.
+    private var engine: AgentTranslator.Engine?
     private var updating = false
     private var libraryID: UUID?
     private var libraryDirty = false
@@ -128,7 +131,13 @@ final class ImageTranslationWindowController: NSWindowController, NSWindowDelega
         status.textColor = .secondaryLabelColor
         libraryStatus.font = .systemFont(ofSize: 12)
         libraryStatus.textColor = .secondaryLabelColor
-        let footer = NSStackView(views: [spinner, status, NSView(), libraryStatus])
+        agentButton = button(L("Continue in Snapok Agent", "在 Snapok Agent 中继续"), #selector(continueInAgent))
+        agentButton.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+        agentButton.imagePosition = .imageLeading
+        agentButton.toolTip = L("Open a chat with the original and the translation, e.g. to redraw it in the original fonts",
+                                "带上原图和译文图开始对话，比如让 Agent 按原字体重新绘制")
+        agentButton.isEnabled = false
+        let footer = NSStackView(views: [spinner, status, NSView(), libraryStatus, agentButton])
         footer.spacing = 8
         for view in [toolbar, canvas, inspector, footer] {
             view.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(view)
@@ -161,11 +170,12 @@ final class ImageTranslationWindowController: NSWindowController, NSWindowDelega
         task = Task { [weak self] in
             guard let self else { return }
             do {
-                let blocks = try await AIAssistant.translateImage(canvas.source, to: target, useVision: useVision)
+                let (blocks, engine) = try await AgentTranslator.blocks(for: canvas.source, to: target, useVision: useVision)
                 try Task.checkCancellation()
+                self.engine = engine
                 initial = blocks
                 canvas.replace(blocks)
-                copyButton.isEnabled = true; saveButton.isEnabled = true; libraryButton.isEnabled = true
+                copyButton.isEnabled = true; saveButton.isEnabled = true; libraryButton.isEnabled = true; agentButton.isEnabled = true
                 refreshInspector()
                 if AppSettings.autoSave || libraryID != nil { saveToLibrary() }
             } catch is CancellationError { return }
@@ -199,7 +209,8 @@ final class ImageTranslationWindowController: NSWindowController, NSWindowDelega
         status.textColor = overflow > 0 ? .systemOrange : .secondaryLabelColor
         status.stringValue = overflow > 0
             ? L("\(overflow) text blocks may be clipped. Enlarge their boxes or reduce the font size.", "\(overflow) 个文字块可能被裁切，请扩大文字框或减小字号。")
-            : L("\(canvas.blocks.count) blocks translated. Review the image before exporting.", "已翻译 \(canvas.blocks.count) 个文字块，请检查后导出。")
+            : L("\(canvas.blocks.count) blocks translated (\(engine?.title ?? "AI")). Review the image before exporting.",
+                "已翻译 \(canvas.blocks.count) 个文字块（\(engine?.title ?? "AI")），请检查后导出。")
     }
 
     func textDidChange(_ notification: Notification) {
@@ -264,6 +275,19 @@ final class ImageTranslationWindowController: NSWindowController, NSWindowDelega
             libraryStatus.stringValue = L("Library save failed. Try Save to Library again.", "图库保存失败，请再次点击保存到图库。")
             if showFeedback { operationFeedback.showError(libraryStatus.stringValue, in: window) }
         }
+    }
+
+    /// Hands the current translation (with edits) and the original to Snapok Agent.
+    @objc private func continueInAgent() {
+        guard let data = ImageTranslationRenderer.png(source: canvas.source, blocks: canvas.blocks),
+              let translated = NSImage(data: data) else {
+            operationFeedback.showError(L("Could not render the image. Try again.", "无法生成图片，请重试。"), in: window)
+            return
+        }
+        let size = CGSize(width: canvas.source.width, height: canvas.source.height)
+        translated.size = size
+        Telemetry.capture("ai_used", ["feature": "agent_translate"])
+        ImageAgentEntry.open?(translated, .continueTranslation(original: NSImage(cgImage: canvas.source, size: size)))
     }
 
     @objc private func copyImage() {

@@ -4,17 +4,21 @@ import UniformTypeIdentifiers
 enum SettingsPage: CaseIterable {
     case profile
     case general
+    case shortcuts
     case ai
     case models
     case about
+    case more
 
     var title: String {
         switch self {
         case .profile: return L("Profile", "个人资料")
         case .general: return L("General", "通用")
+        case .shortcuts: return L("Shortcuts", "快捷键")
         case .ai: return L("AI Features", "AI 功能")
         case .models: return L("Models", "模型")
         case .about: return L("About", "关于")
+        case .more: return L("More from Us", "周边")
         }
     }
 
@@ -22,9 +26,11 @@ enum SettingsPage: CaseIterable {
         switch self {
         case .profile: return "person.crop.circle"
         case .general: return "gearshape"
+        case .shortcuts: return "keyboard"
         case .ai: return "sparkles"
         case .models: return "cpu"
         case .about: return "info.circle"
+        case .more: return "square.grid.2x2"
         }
     }
 }
@@ -73,6 +79,15 @@ final class SettingsOverlay: NSView {
         nav.alignment = .leading
         nav.spacing = 4
         for page in SettingsPage.allCases where page != .profile {
+            if page == .more {
+                // Our other products sit apart from Snapok's own settings.
+                let separator = NSBox()
+                separator.boxType = .separator
+                nav.addArrangedSubview(separator)
+                separator.widthAnchor.constraint(equalTo: nav.widthAnchor, constant: -16).isActive = true
+                nav.setCustomSpacing(10, after: nav.arrangedSubviews[nav.arrangedSubviews.count - 2])
+                nav.setCustomSpacing(10, after: separator)
+            }
             let item = SidebarItem(title: page.title, symbol: page.symbol) { [weak self] in self?.show(page) }
             navItems[page] = item
             nav.addArrangedSubview(item)
@@ -156,9 +171,11 @@ final class SettingsOverlay: NSView {
         switch page {
         case .profile: return ProfilePane()
         case .general: return GeneralSettingsPane()
+        case .shortcuts: return ShortcutsPane()
         case .ai: return AIFeaturesPane()
         case .models: return ModelsPane()
         case .about: return AboutPane()
+        case .more: return MorePane()
         }
     }
 

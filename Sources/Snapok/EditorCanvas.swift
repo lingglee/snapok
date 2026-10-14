@@ -18,13 +18,16 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
     }
     var selectedColor: NSColor = Style.colors[0]
     var mosaicStyle = MosaicStyle.current
-    var usesMosaicStyle: Bool { selectedTool == .mosaic || selectedIndex.map { annotations[$0].kind == .mosaic } == true }
+    var usesMosaicStyle: Bool { selectedTool == .mosaic || selectedIndex.map { annotations[$0].isStylableMosaic } == true }
     var textStyle = AnnotationTextStyle()
     var usesTextStyle: Bool { selectedTool == .text || selectedIndex.map { annotations[$0].kind == .text } == true }
     var sizeLevel = 1 { didSet { if oldValue != sizeLevel { textStyle.pointSize = Style.lineWidth(for: .text, level: sizeLevel) } } }
     var onChange: (() -> Void)?
     var onCommand: ((ToolbarAction) -> Void)?
     var onViewportChange: (() -> Void)?
+    /// Reports a dragged watermark's new centre, as fractions of the canvas.
+    var onWatermarkMove: ((CGPoint) -> Void)?
+    private var watermarkDrag: (start: CGPoint, frame: CGRect)?
     private var manualZoom: CGFloat?
     private var pan = CGPoint.zero
     private var selectedIndex: Int?
@@ -94,8 +97,47 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
         pan.y = min(limitY, max(-limitY, pan.y))
     }
 
+    private var canvasRect: CGRect { CGRect(origin: .zero, size: canvasSize) }
+    private var photoRect: CGRect {
+        CGRect(x: composition.horizontalPadding, y: composition.verticalPadding, width: CGFloat(source.width), height: CGFloat(source.height))
+    }
+    private var watermarkFrame: CGRect? { composition.watermark?.textFrame(canvas: canvasRect, photo: photoRect) }
+    private func canvasPoint(from point: CGPoint) -> CGPoint {
+        CGPoint(x: (point.x - canvasOrigin.x) / zoom, y: (point.y - canvasOrigin.y) / zoom)
+    }
+
+    override func resetCursorRects() {
+        guard let frame = watermarkFrame else { return }
+        let rect = CGRect(x: canvasOrigin.x + frame.minX * zoom, y: canvasOrigin.y + frame.minY * zoom,
+                          width: frame.width * zoom, height: frame.height * zoom)
+        addCursorRect(rect.intersection(bounds), cursor: .openHand)
+    }
+
+    /// Starts moving the watermark when the press lands on it. On the screenshot itself, an active tool wins.
+    private func beginWatermarkDrag(at point: CGPoint) -> Bool {
+        let point = canvasPoint(from: point)
+        guard let frame = watermarkFrame, frame.insetBy(dx: -4 / zoom, dy: -4 / zoom).contains(point),
+              selectedTool == nil || !photoRect.contains(point) else { return false }
+        watermarkDrag = (point, frame)
+        selectedIndex = nil
+        NSCursor.closedHand.set()
+        changed()
+        return true
+    }
+
+    private func dragWatermark(to point: CGPoint) {
+        guard let drag = watermarkDrag, composition.watermark != nil else { return }
+        let point = canvasPoint(from: point), canvas = canvasRect
+        let frame = drag.frame.offsetBy(dx: point.x - drag.start.x, dy: point.y - drag.start.y)
+        let x = min(max(frame.minX, canvas.minX), canvas.maxX - frame.width) + frame.width / 2
+        let y = min(max(frame.minY, canvas.minY), canvas.maxY - frame.height) + frame.height / 2
+        composition.watermark?.position = .custom
+        composition.watermark?.center = CGPoint(x: x / canvas.width, y: y / canvas.height)
+    }
+
     private func viewportChanged() {
         constrainPan()
+        window?.invalidateCursorRects(for: self)
         layoutTextEditor()
         needsDisplay = true
         onViewportChange?()
@@ -186,6 +228,15 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
         return removed
     }
     func autoRedactionCount(_ kind: AutoRedactionKind) -> Int { annotations.filter { $0.autoRedaction == kind }.count }
+    /// Removes every annotation, back to the screenshot as captured, as one undoable step.
+    func removeAllAnnotations() {
+        commitTextEditing()
+        guard !annotations.isEmpty else { return }
+        record()
+        annotations = []
+        selectedIndex = nil
+        changed()
+    }
     func deleteSelected() {
         commitTextEditing()
         guard let index = selectedIndex else { return }
@@ -197,7 +248,7 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
             record()
             annotations[index].color = selectedColor
             annotations[index].sizeLevel = sizeLevel
-            if annotations[index].kind == .mosaic { annotations[index].restyleMosaic(mosaicStyle) }
+            if annotations[index].isStylableMosaic { annotations[index].restyleMosaic(mosaicStyle) }
             if annotations[index].kind == .step || annotations[index].stepNumber != nil {
                 annotations[index].stepStyle = stepStyle
                 if annotations[index].kind == .step { StepMarkers.resize(&annotations[index]) }
@@ -232,6 +283,7 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
     override func mouseDown(with event: NSEvent) {
         if activeTextField != nil { commitTextEditing(); return }
         window?.makeFirstResponder(self)
+        if beginWatermarkDrag(at: convert(event.locationInWindow, from: nil)) { return }
         let point = imagePoint(from: convert(event.locationInWindow, from: nil))
         guard CGRect(origin: .zero, size: sourceImage.size).contains(point) else { selectedIndex = nil; changed(); return }
         let hit = annotations.indices.reversed().first { annotations[$0].hitTest(point) }
@@ -245,7 +297,7 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
                 stepStyle = annotations[hit].stepStyle ?? .filledCircle
             }
             if annotations[hit].kind == .text { textStyle = annotations[hit].effectiveTextStyle }
-            if annotations[hit].kind == .mosaic { mosaicStyle = annotations[hit].effectiveMosaicStyle }
+            if annotations[hit].isStylableMosaic { mosaicStyle = annotations[hit].effectiveMosaicStyle }
             if annotations[hit].kind == .text, event.clickCount == 2 {
                 editText(at: point, index: hit)
             } else { record(); lastPoint = point }
@@ -262,12 +314,14 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
         }
         if tool == .text { editText(at: point, index: nil); return }
         start = point
-        draft = Annotation(kind: tool, rect: CGRect(origin: point, size: .zero), points: [point, point], color: selectedColor, sizeLevel: sizeLevel)
+        draft = Annotation(kind: tool == .erase ? .mosaic : tool, rect: CGRect(origin: point, size: .zero), points: [point, point], color: selectedColor, sizeLevel: sizeLevel)
         if tool == .mosaic { draft?.mosaicStyle = mosaicStyle }
+        if tool == .erase { draft?.mosaicStyle = .eraseBox }
         changed()
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if watermarkDrag != nil { dragWatermark(to: convert(event.locationInWindow, from: nil)); return }
         let raw = imagePoint(from: convert(event.locationInWindow, from: nil))
         let point = CGPoint(x: min(max(raw.x, 0), sourceImage.size.width), y: min(max(raw.y, 0), sourceImage.size.height))
         if let lastPoint, let index = selectedIndex {
@@ -286,6 +340,12 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if watermarkDrag != nil {
+            watermarkDrag = nil
+            if let center = composition.watermark?.center, composition.watermark?.position == .custom { onWatermarkMove?(center) }
+            window?.invalidateCursorRects(for: self)
+            return
+        }
         if var draft, draft.isBoxMosaic ? draft.rect.width >= 3 && draft.rect.height >= 3 : draft.rect.width + draft.rect.height >= 2 {
             if draft.kind == .rect, autoNumberRect {
                 draft.stepNumber = String(StepMarkers.nextNumber(in: annotations))
@@ -383,8 +443,13 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
     override func keyDown(with event: NSEvent) {
         if event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty {
             if let tool = ToolKind.matchingShortcut(event) { chooseTool(tool); return }
+            if event.keyCode == ToolShortcuts.selectKeyCode { chooseTool(nil); return }
+        }
+        if ToolShortcuts.matches(.undo, event) { undoEdit(); return }
+        if ToolShortcuts.matches(.save, event) { onCommand?(.save); return }
+        if ToolShortcuts.matches(.pin, event) { onCommand?(.pin); return }
+        if event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty {
             switch Int(event.keyCode) {
-            case kVK_ANSI_V: chooseTool(nil); return
             case kVK_ANSI_1: sizeLevel = 0; applyStyle(); return
             case kVK_ANSI_2: sizeLevel = 1; applyStyle(); return
             case kVK_ANSI_3: sizeLevel = 2; applyStyle(); return
@@ -398,10 +463,7 @@ final class BackgroundPreview: NSView, NSTextFieldDelegate {
             case kVK_ANSI_Equal: zoomBy(1.25)
             case kVK_ANSI_Minus: zoomBy(0.8)
             case kVK_ANSI_0: fitToWindow()
-            case kVK_ANSI_Z: undoEdit()
             case kVK_ANSI_C: onCommand?(.done)
-            case kVK_ANSI_S: onCommand?(.save)
-            case kVK_ANSI_T: onCommand?(.pin)
             default: super.keyDown(with: event)
             }
         } else if event.keyCode == UInt16(kVK_Delete) || event.keyCode == UInt16(kVK_ForwardDelete) { deleteSelected() }

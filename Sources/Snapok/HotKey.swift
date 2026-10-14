@@ -50,6 +50,18 @@ struct HotKey: Equatable, Sendable {
 
     var isFunctionKey: Bool { key.count > 1 && key.hasPrefix("F") && Int(key.dropFirst()) != nil }
 
+    /// Whether an enabled macOS keyboard shortcut (System Settings → Keyboard → Keyboard Shortcuts) uses this key.
+    /// Those are not Carbon hot keys, so registering would succeed and quietly lose to the system.
+    var isUsedBySystem: Bool {
+        let flags = Self.modifierOrder.reduce(0) { modifiers & UInt32($1.flag) != 0 ? $0 | Int($1.menu.rawValue) : $0 }
+        let shortcuts = UserDefaults(suiteName: "com.apple.symbolichotkeys")?.dictionary(forKey: "AppleSymbolicHotKeys") ?? [:]
+        return shortcuts.values.contains { entry in
+            guard let entry = entry as? [String: Any], entry["enabled"] as? Bool == true,
+                  let parameters = (entry["value"] as? [String: Any])?["parameters"] as? [Int], parameters.count == 3 else { return false }
+            return parameters[1] == Int(keyCode) && parameters[2] & 0xFF0000 == flags
+        }
+    }
+
     /// A global shortcut needs ⌃, ⌥, or ⌘ (Shift alone would swallow typing); function keys may stand alone.
     var isValidGlobalShortcut: Bool {
         isFunctionKey || modifiers & UInt32(controlKey | optionKey | cmdKey) != 0
@@ -93,11 +105,17 @@ enum HotKeyAction: UInt32, CaseIterable, Sendable {
     case capture = 1
     /// Pins the most recent finished screenshot (or the clipboard image) to the screen.
     case pin = 2
+    /// Pastes the screenshot just copied, framed in the last editing style. Only armed for a while after a capture.
+    case pasteStyled = 3
+
+    /// Registered only while armed, so it does not take the key from other apps the rest of the time.
+    var isArmedOnly: Bool { self == .pasteStyled }
 
     var preferenceKey: String {
         switch self {
         case .capture: return HotKey.preferenceKey
         case .pin: return "app.pinHotKey"
+        case .pasteStyled: return "app.pasteStyledHotKey"
         }
     }
 
@@ -105,6 +123,7 @@ enum HotKeyAction: UInt32, CaseIterable, Sendable {
         switch self {
         case .capture: return AppChannel.defaultHotKey
         case .pin: return AppChannel.defaultPinHotKey
+        case .pasteStyled: return AppChannel.defaultPasteStyledHotKey
         }
     }
 }
@@ -121,6 +140,10 @@ final class HotKeyCenter {
     })
     private var refs: [HotKeyAction: EventHotKeyRef] = [:]
     private var handlers: [HotKeyAction: () -> Void] = [:]
+    /// Armed-only shortcuts that are currently live, with the task that releases them.
+    private var armed: [HotKeyAction: Task<Void, Never>] = [:]
+    /// While recording a new shortcut nothing is registered; arming then waits for `resume`.
+    private var suspended = false
 
     /// The screenshot shortcut.
     var current: HotKey { hotKey(for: .capture) }
@@ -137,8 +160,50 @@ final class HotKeyCenter {
         set { handlers[.pin] = newValue }
     }
 
+    func setHandler(_ action: HotKeyAction, _ handler: @escaping () -> Void) { handlers[action] = handler }
+
+    /// Makes an armed-only shortcut live for `seconds`, restarting the countdown if it already is.
+    func arm(_ action: HotKeyAction, for seconds: TimeInterval) {
+        armed[action]?.cancel()
+        armed[action] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            guard !Task.isCancelled else { return }
+            self?.disarm(action)
+        }
+        if !suspended { register(action) }
+    }
+
+    func disarm(_ action: HotKeyAction) {
+        armed[action]?.cancel()
+        armed[action] = nil
+        unregister(action)
+    }
+
+    private func isLive(_ action: HotKeyAction) -> Bool { !action.isArmedOnly || armed[action] != nil }
+
     func hotKey(for action: HotKeyAction) -> HotKey {
         hotKeys[action] ?? action.defaultHotKey
+    }
+
+    /// On first launch, the screenshot shortcut candidates that were taken, so onboarding can say why it got another one.
+    private(set) var skippedCaptureHotKeys: [HotKey] = []
+
+    /// First launch: takes the first screenshot shortcut that macOS and other apps leave free, and saves it.
+    private func pickCaptureHotKeyIfUnset() {
+        guard UserDefaults.standard.dictionary(forKey: HotKeyAction.capture.preferenceKey) == nil else { return }
+        let others = HotKeyAction.allCases.filter { $0 != .capture }.map(hotKey(for:))
+        for candidate in AppChannel.captureHotKeyCandidates {
+            hotKeys[.capture] = candidate
+            if !others.contains(candidate), !candidate.isUsedBySystem, register(.capture) {
+                candidate.save(key: HotKeyAction.capture.preferenceKey)
+                log("picked screenshot shortcut \(candidate.description)")
+                return
+            }
+            skippedCaptureHotKeys.append(candidate)
+        }
+        // Everything is taken: keep the first, which the user can change in onboarding or Settings.
+        hotKeys[.capture] = AppChannel.captureHotKeyCandidates.first
+        skippedCaptureHotKeys = []
     }
 
     func start() {
@@ -152,7 +217,8 @@ final class HotKeyCenter {
             Task { @MainActor in HotKeyCenter.shared.handlers[action]?() }
             return noErr
         }, 1, &eventType, nil, nil)
-        HotKeyAction.allCases.forEach { register($0) }
+        pickCaptureHotKeyIfUnset()
+        HotKeyAction.allCases.filter(isLive).filter { refs[$0] == nil }.forEach { register($0) }
     }
 
     /// Switches the screenshot shortcut; keeps the old one and returns false when macOS refuses it.
@@ -167,19 +233,25 @@ final class HotKeyCenter {
         hotKeys[action] = hotKey
         guard register(action) else {
             hotKeys[action] = previous
-            register(action)
+            if isLive(action) { register(action) }
             return .refused
         }
+        // An armed-only shortcut was registered just to check macOS accepts it.
+        if !isLive(action) { unregister(action) }
         hotKey.save(key: action.preferenceKey)
         NotificationCenter.default.post(name: Self.didChange, object: nil)
         return .changed
     }
 
     /// Releases the shortcuts while the user records a new one, so pressing one does not trigger it.
-    func suspend() { HotKeyAction.allCases.forEach { unregister($0) } }
+    func suspend() {
+        suspended = true
+        HotKeyAction.allCases.forEach { unregister($0) }
+    }
 
     func resume() {
-        for action in HotKeyAction.allCases where refs[action] == nil { register(action) }
+        suspended = false
+        for action in HotKeyAction.allCases where refs[action] == nil && isLive(action) { register(action) }
     }
 
     func stop() { suspend() }

@@ -1,6 +1,7 @@
 import AppKit
 import Carbon
 @preconcurrency import ApplicationServices
+@preconcurrency import ScreenCaptureKit
 
 @MainActor
 enum Brand {
@@ -55,6 +56,8 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before anything saves preferences: no shortcut chosen and an empty library means a first launch.
+        let isNewUser = UserDefaults.standard.dictionary(forKey: HotKey.preferenceKey) == nil && HistoryStore.shared.items.isEmpty
         AppAppearance.saved().apply()
         NSApp.setActivationPolicy(.regular)
         NSApp.applicationIconImage = Brand.appIcon
@@ -63,6 +66,7 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
         configureMenuBar()
         HotKeyCenter.shared.onPress = { [weak self] in self?.startScreenshot() }
         HotKeyCenter.shared.onPinPress = { [weak self] in self?.pinLatest() }
+        HotKeyCenter.shared.setHandler(.pasteStyled) { [weak self] in self?.screenshotController.pasteStyled() }
         HotKeyCenter.shared.start()
         updateCaptureShortcut()
         NotificationCenter.default.addObserver(forName: HotKeyCenter.didChange, object: nil, queue: .main) { [weak self] _ in
@@ -77,9 +81,23 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
         }
         let hasScreenAccess = CGPreflightScreenCaptureAccess()
         log("screen capture access=\(hasScreenAccess), accessibility=\(AXIsProcessTrusted())")
+        ImageAgentEntry.open = { [weak self] image, request in
+            self?.mainWindowController().presentImageAgent(attaching: image, request: request)
+        }
+        ImageAgentEntry.openChat = { [weak self] id in self?.mainWindowController().presentImageAgent(chat: id) }
+        AgentNotifier.shared.start()
         showLibrary()
+        OnboardingWindowController.shared.onCapture = { [weak self] in self?.startScreenshot() }
+        OnboardingWindowController.shared.onAskAgent = { image in ImageAgentEntry.open?(image, .edit) }
+        OnboardingWindowController.showIfNeeded(isNewUser: isNewUser)
         Updater.shared.start()
         Telemetry.start()
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where !SnapokCloud.handle(url) {
+            log("ignored URL with scheme \(url.scheme ?? "")")
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -98,6 +116,10 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
         mainWindowController().present()
     }
 
+    @objc private func showOnboarding() {
+        OnboardingWindowController.shared.presentFromStart()
+    }
+
     @objc private func showAbout() {
         mainWindowController().presentSettings(.about)
     }
@@ -108,6 +130,7 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
         controller.onCapture = { [weak self] in self?.startScreenshot() }
         controller.onOpen = { [weak self] item in self?.screenshotController.openEditor(for: item) }
         controller.onPin = { [weak self] image in self?.screenshotController.pinCentered(image, on: nil) }
+        controller.onEditImage = { [weak self] image in self?.screenshotController.openEditor(image: image) }
         mainWindow = controller
         return controller
     }
@@ -135,6 +158,7 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
         updateMenuItems.append(update)
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: L("Settings…", "设置…"), action: #selector(showPreferences), keyEquivalent: ",").target = self
+        appMenu.addItem(withTitle: L("Getting Started…", "新手引导…"), action: #selector(showOnboarding), keyEquivalent: "").target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: L("Hide ", "隐藏 ") + AppChannel.displayName, action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: L("Hide Others", "隐藏其他"), action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -268,11 +292,18 @@ final class SnapokApp: NSObject, NSApplicationDelegate {
 
 @MainActor
 final class ScreenshotController {
+    /// Posted when a screenshot is finished (copied, pinned, saved, or opened in the editor); the object is the image.
+    static let didFinishCapture = Notification.Name("ScreenshotController.didFinishCapture")
+
     private var windows: [CaptureWindow] = []
     private var pinnedWindows: [PinnedImageWindow] = []
     private var editors: [BackgroundEditorController] = []
     private var scrollSession: ScrollingCaptureSession?
-    private var screenSnapshot: DesktopSnapshot?
+    private var screenSnapshots: [DesktopSnapshot] = []
+    /// The windows under the capture overlay, front to back, and the app in front when it opened: they name the
+    /// app a capture came from, for the library title when no model is around.
+    private var captureWindowFrames: [WindowTarget] = []
+    private var captureFrontmostApp: String?
     private var preparingCapture = false
     /// The screenshot finished most recently with ✓ (copy), save, or the editor's Copy Image.
     /// The pin shortcut pins it where it was captured; `rect` is nil when it should be centered.
@@ -300,14 +331,53 @@ final class ScreenshotController {
     }
 
     /// Remembers a finished screenshot for the pin shortcut.
-    private func rememberLatest(_ output: NSImage, styled: Bool, rect: CGRect, screen: NSScreen?) {
-        if styled {
-            let scale = screen?.backingScaleFactor ?? 1
-            let image = output.copy() as? NSImage ?? output
-            image.size = CGSize(width: output.size.width / scale, height: output.size.height / scale)
-            latestCapture = (image, nil, screen)
+    private func rememberLatest(_ output: NSImage, rect: CGRect, screen: NSScreen?) {
+        latestCapture = (output, rect, screen)
+    }
+
+    /// How long after a screenshot is copied the paste-styled shortcut stays live.
+    static let pasteStyledWindow: TimeInterval = 5 * 60
+    /// The screenshot copied most recently with ✓, for the paste-styled shortcut. `styled` is set when it was
+    /// copied framed (「复制时套用样式」), so the shortcut pastes the plain one instead.
+    private var copiedCapture: (image: NSImage, screen: NSScreen?, styled: NSImage?)?
+
+    /// Frames a screenshot in the last editing style.
+    private func styled(_ image: NSImage, screen: NSScreen?) -> NSImage? {
+        CaptureStyle(preferences: .load(), screen: screen).render(image)
+    }
+
+    /// The paste-styled shortcut pastes the other version of the copied screenshot into the front app: framed in the
+    /// last editing style, or the plain one when screenshots are copied framed. The clipboard then goes back to what ✓
+    /// copied. Without Accessibility access it only copies that other version.
+    func pasteStyled() {
+        guard let copied = copiedCapture else { NSSound.beep(); return }
+        let paste: NSImage, restore: NSImage
+        if let framed = copied.styled {
+            (paste, restore) = (copied.image, framed)
         } else {
-            latestCapture = (output, rect, screen)
+            guard let framed = styled(copied.image, screen: copied.screen) else {
+                log("paste styled: framing failed")
+                NSSound.beep()
+                return
+            }
+            (paste, restore) = (framed, copied.image)
+        }
+        ImageExport.copy(paste)
+        Telemetry.capture("paste_styled")
+        guard AXIsProcessTrusted() else {
+            log("paste styled: copied only, no accessibility access")
+            return
+        }
+        // Post ⌘V with explicit flags so the still-held ⇧ (or ⌥) of the shortcut doesn't change it.
+        let source = CGEventSource(stateID: .combinedSessionState)
+        for down in [true, false] {
+            let event = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: down)
+            event?.flags = .maskCommand
+            event?.post(tap: .cghidEventTap)
+        }
+        // Give the app time to read the pasteboard before what ✓ copied goes back on it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            ImageExport.copy(restore)
         }
     }
 
@@ -327,10 +397,13 @@ final class ScreenshotController {
             // The system request may return before its authorization window closes.
             // Leave that window in control instead of covering it with an app alert.
             if !CGPreflightScreenCaptureAccess() {
+                // macOS shows its own prompt only the first time; after that, explain how to turn it on.
+                let firstAsk = !ScreenRecordingPermission.wasRequested
                 let granted = await ScreenRecordingPermission.request()
                 guard granted else {
                     self.preparingCapture = false
                     log("capture blocked: no screen recording access")
+                    if !firstAsk { ScreenRecordingPermission.explainMissingAccess() }
                     return
                 }
             }
@@ -338,20 +411,24 @@ final class ScreenshotController {
                 self.preparingCapture = false
                 return
             }
+            self.captureFrontmostApp = NSWorkspace.shared.frontmostApplication
+                .flatMap { $0.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : $0.localizedName }
             let frames = await WindowDetector.visibleWindowFrames()
+            self.captureWindowFrames = frames
+            await self.beginCapture(windowFrames: frames)
             self.preparingCapture = false
-            self.beginCapture(windowFrames: frames)
         }
     }
 
-    private func beginCapture(windowFrames: [WindowTarget]) {
-        guard let snapshot = ScreenCapture.captureAllScreens() else {
+    private func beginCapture(windowFrames: [WindowTarget]) async {
+        guard let snapshots = await ScreenCapture.captureAllScreens() else {
             log("screen capture failed, access=\(CGPreflightScreenCaptureAccess())")
             NSSound.beep()
             return
         }
-        screenSnapshot = snapshot
-        windows = NSScreen.screens.map { screen in
+        screenSnapshots = snapshots
+        windows = NSScreen.screens.compactMap { screen in
+            guard let snapshot = snapshots.first(where: { $0.bounds == screen.frame }) else { return nil }
             let window = CaptureWindow(screen: screen, desktopImage: snapshot.image, windowFrames: windowFrames, desktopBounds: snapshot.bounds)
             window.captureDelegate = self
             return window
@@ -369,50 +446,40 @@ final class ScreenshotController {
             startScrollingCapture(in: result.globalRect)
             return
         }
-        guard let snapshot = screenSnapshot,
+        guard let snapshot = screenSnapshots.first(where: { $0.bounds == window.frame }),
               let rendered = ScreenCapture.render(image: snapshot.image, result: result, desktopBounds: snapshot.bounds) else {
             closeWindows()
             return
         }
 
         let original = ScreenCapture.crop(image: snapshot.image, to: result.globalRect, desktopBounds: snapshot.bounds)
+        let appName = sourceApp(for: result.globalRect)
         let screen = NSScreen.screens.first { $0.frame.intersects(result.globalRect) }
-        let style = mode == .editImage ? nil : CaptureStyle.forNewCapture(screen: screen)
-        let output: NSImage
-        if let style {
-            guard let styled = style.render(rendered) else {
-                closeWindows()
-                let alert = NSAlert()
-                alert.messageText = L("Unable to apply image style", "无法应用图片样式")
-                alert.informativeText = L("The framed image exceeds the supported size. Reduce padding in the image editor or disable reuse of the last editing style.", "应用样式后的图片超出支持的尺寸。请在编辑器中减小留白，或关闭沿用上次编辑样式。")
-                alert.runModal()
-                return
-            }
-            output = styled
-        } else { output = rendered }
+        // Captures are copied, pinned, and saved as they are; the paste-styled shortcut frames a copy on demand.
+        let output = rendered
         Telemetry.capture("capture_finished", ["action": "\(mode)", "annotations": result.annotations.count])
+        NotificationCenter.default.post(name: Self.didFinishCapture, object: output)
         switch mode {
         case .scroll:
             break
         case .editImage:
             closeWindows()
             guard let original else { return }
-            let item = HistoryStore.shared.add(original: original, annotations: result.annotations)
+            let item = HistoryStore.shared.add(original: original, annotations: result.annotations, appName: appName)
             openEditor(image: original, annotations: result.annotations, screen: screen, historyID: item?.id)
         case .copy:
-            ImageExport.copy(output)
-            rememberLatest(output, styled: style != nil, rect: result.globalRect, screen: screen)
+            let framed = AppSettings.copyStyled ? styled(output, screen: screen) : nil
+            ImageExport.copy(framed ?? output)
+            rememberLatest(output, rect: result.globalRect, screen: screen)
+            copiedCapture = (output, screen, framed)
+            HotKeyCenter.shared.arm(.pasteStyled, for: Self.pasteStyledWindow)
             closeWindows()
-            record(original, result.annotations, style: style)
+            record(original, result.annotations, appName: appName)
         case .pin:
-            if style != nil {
-                output.size = CGSize(width: output.size.width / (screen?.backingScaleFactor ?? 1),
-                                     height: output.size.height / (screen?.backingScaleFactor ?? 1))
-                pinCentered(output, on: screen)
-            } else { pin(output, at: result.globalRect) }
+            pin(output, at: result.globalRect)
             latestCapture = nil
             closeWindows()
-            record(original, result.annotations, style: style)
+            record(original, result.annotations, appName: appName)
         case .save:
             windows.forEach { $0.orderOut(nil) }
             switch ImageExport.save(output) {
@@ -420,13 +487,21 @@ final class ScreenshotController {
                 windows.forEach { $0.orderFrontRegardless() }
                 window.makeKey()
             case .saved:
-                rememberLatest(output, styled: style != nil, rect: result.globalRect, screen: screen)
+                rememberLatest(output, rect: result.globalRect, screen: screen)
                 closeWindows()
-                record(original, result.annotations, style: style)
+                record(original, result.annotations, appName: appName)
             case .failed:
                 closeWindows()
             }
         }
+    }
+
+    /// The app whose window is frontmost under the middle of the capture, else the app that was in front.
+    private func sourceApp(for rect: CGRect) -> String? {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let own = ProcessInfo.processInfo.processIdentifier
+        let window = captureWindowFrames.first { !$0.isSystemUI && $0.pid != own && $0.frame.contains(center) }
+        return window.flatMap { NSRunningApplication(processIdentifier: $0.pid)?.localizedName } ?? captureFrontmostApp
     }
 
     /// Hands the selected area to a scrolling capture; the stitched image opens in the editor.
@@ -451,10 +526,10 @@ final class ScreenshotController {
     }
 
     /// Adds a finished capture to the library after the overlay is gone, so writing the PNG never delays it.
-    private func record(_ original: NSImage?, _ annotations: [Annotation], style: CaptureStyle? = nil) {
+    private func record(_ original: NSImage?, _ annotations: [Annotation], appName: String? = nil) {
         guard let original else { return }
         DispatchQueue.main.async {
-            HistoryStore.shared.add(original: original, annotations: annotations, style: style)
+            HistoryStore.shared.add(original: original, annotations: annotations, appName: appName)
         }
     }
 
@@ -471,6 +546,11 @@ final class ScreenshotController {
         }
         openEditor(image: original, annotations: item.annotations, screen: NSScreen.main, historyID: item.id,
                    style: HistoryStore.shared.backgroundPreferences(for: item))
+    }
+
+    /// Opens an image that is not in the library, such as a Snapok Agent result.
+    func openEditor(image: NSImage) {
+        openEditor(image: image, annotations: [], screen: NSScreen.main, historyID: nil)
     }
 
     private func openEditor(image: NSImage, annotations: [Annotation], screen: NSScreen?, historyID: UUID?, style: BackgroundPreferences? = nil) {
@@ -514,7 +594,7 @@ final class ScreenshotController {
     private func closeWindows() {
         windows.forEach { $0.orderOut(nil) }
         windows.removeAll()
-        screenSnapshot = nil
+        screenSnapshots.removeAll()
         MosaicCache.clear()
         NSCursor.arrow.set()
     }
@@ -557,30 +637,13 @@ enum ToolKind: String, CaseIterable, Codable {
     case mosaic
     case text
     case step
+    /// Draws a mosaic box in the `eraseBox` style; there are no `.erase` annotations.
+    case erase
 
-    var shortcut: String {
-        switch self {
-        case .rect: return "R"
-        case .oval: return "O"
-        case .arrow: return "A"
-        case .pen: return "P"
-        case .mosaic: return "M"
-        case .text: return "T"
-        case .step: return "N"
-        }
-    }
+    /// The key that picks this tool; customizable in settings.
+    var shortcut: String { ToolShortcuts.hotKey(for: rawValue).key }
 
-    var shortcutKeyCode: UInt16 {
-        switch self {
-        case .rect: return UInt16(kVK_ANSI_R)
-        case .oval: return UInt16(kVK_ANSI_O)
-        case .arrow: return UInt16(kVK_ANSI_A)
-        case .pen: return UInt16(kVK_ANSI_P)
-        case .mosaic: return UInt16(kVK_ANSI_M)
-        case .text: return UInt16(kVK_ANSI_T)
-        case .step: return UInt16(kVK_ANSI_N)
-        }
-    }
+    var shortcutKeyCode: UInt16 { UInt16(ToolShortcuts.hotKey(for: rawValue).keyCode) }
 
     static func matchingShortcut(_ event: NSEvent) -> ToolKind? {
         guard event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty else { return nil }
@@ -596,6 +659,7 @@ enum ToolKind: String, CaseIterable, Codable {
         case .mosaic: return "checkerboard.rectangle"
         case .text: return "textformat"
         case .step: return "1.circle"
+        case .erase: return "eraser"
         }
     }
 
@@ -608,6 +672,7 @@ enum ToolKind: String, CaseIterable, Codable {
         case .mosaic: return L("Mosaic", "马赛克")
         case .text: return L("Text", "文字")
         case .step: return L("Step Number", "步骤编号")
+        case .erase: return L("Erase", "擦除")
         }
     }
 }
@@ -717,7 +782,9 @@ final class PinnedImageWindow: NSPanel {
     var onClose: (() -> Void)?
     /// The size the image was pinned at; zoom levels are relative to it.
     let baseSize: CGSize
+    /// The width's scale against `baseSize`; zooming keeps the current shape, so the height has its own scale.
     private(set) var zoom: CGFloat = 1
+    private(set) var heightZoom: CGFloat = 1
     static let minZoom: CGFloat = 0.1
     static let maxZoom: CGFloat = 8
 
@@ -745,26 +812,44 @@ final class PinnedImageWindow: NSPanel {
 
     /// Scales the pinned image, keeping `anchor` (screen coordinates, default the center) in place.
     func setZoom(_ value: CGFloat, anchor: CGPoint? = nil) {
+        // Height follows the width so a freely resized pin keeps its shape.
+        let ratio = zoom > 0 ? heightZoom / zoom : 1
         // Never shrink below a usable size, however small the original capture was.
-        let minimum = max(Self.minZoom, 24 / max(1, min(baseSize.width, baseSize.height)))
+        let minimum = max(Self.minZoom, 24 / max(1, baseSize.width), 24 / max(1, baseSize.height * ratio))
         let clamped = min(Self.maxZoom, max(minimum, value))
         guard abs(clamped - zoom) > 0.0001 else {
-            (contentView as? PinnedImageView)?.showZoomBadge(zoom)
+            (contentView as? PinnedImageView)?.showZoomBadge(zoom, heightZoom)
             return
         }
         let old = frame
         let point = anchor ?? CGPoint(x: old.midX, y: old.midY)
         let fx = old.width > 0 ? (point.x - old.minX) / old.width : 0.5
         let fy = old.height > 0 ? (point.y - old.minY) / old.height : 0.5
-        let size = CGSize(width: (baseSize.width * clamped).rounded(), height: (baseSize.height * clamped).rounded())
+        let size = CGSize(width: (baseSize.width * clamped).rounded(), height: (baseSize.height * clamped * ratio).rounded())
         let origin = CGPoint(x: (point.x - fx * size.width).rounded(), y: (point.y - fy * size.height).rounded())
         zoom = clamped
+        heightZoom = clamped * ratio
         setFrame(CGRect(origin: origin, size: size), display: true)
-        (contentView as? PinnedImageView)?.showZoomBadge(clamped)
+        (contentView as? PinnedImageView)?.showZoomBadge(zoom, heightZoom)
+    }
+
+    /// ⌘0: the size and shape the image was pinned at.
+    func resetToActualSize() {
+        heightZoom = zoom
+        setZoom(1)
     }
 
     func zoom(by factor: CGFloat, anchor: CGPoint? = nil) {
         setZoom(zoom * factor, anchor: anchor)
+    }
+
+    /// Applies an edge-drag resize and keeps `zoom` in sync so wheel zoom continues from the new size.
+    func resize(to newFrame: CGRect) {
+        guard baseSize.width > 0, baseSize.height > 0 else { return }
+        zoom = newFrame.width / baseSize.width
+        heightZoom = newFrame.height / baseSize.height
+        setFrame(newFrame, display: true)
+        (contentView as? PinnedImageView)?.showZoomBadge(zoom, heightZoom)
     }
 }
 
@@ -774,6 +859,7 @@ final class PinnedImageView: NSView {
     private let badge = NSTextField(labelWithString: "")
     private var badgeTimer: Timer?
     private static let step: CGFloat = 1.25
+    private var resizeDrag: (handle: SelectionHandle, frame: CGRect, start: CGPoint)?
 
     init(image: NSImage) {
         self.image = image
@@ -795,7 +881,17 @@ final class PinnedImageView: NSView {
             badge.centerYAnchor.constraint(equalTo: centerYAnchor),
             badge.widthAnchor.constraint(greaterThanOrEqualToConstant: 56)
         ])
+        toolTip = L("Drag to move; drag an edge to change the width or height, a corner to scale (hold ⇧ to resize freely); double-click to close",
+                    "拖动图片移动；拖动边缘单独调整宽或高，拖动四角等比缩放（按住 ⇧ 自由缩放）；双击关闭")
+        NotificationCenter.default.addObserver(forName: PinBorder.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.border = PinBorder.load()
+                self?.needsDisplay = true
+            }
+        }
     }
+
+    private var border = PinBorder.load()
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
@@ -807,17 +903,29 @@ final class PinnedImageView: NSView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        for (handle, rect) in PinnedImageResize.regions(in: bounds) {
+            addCursorRect(rect, cursor: handle.cursor)
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSGraphicsContext.current?.imageInterpolation = .high
         image.draw(in: bounds)
-        Style.accent.withAlphaComponent(0.8).setStroke()
-        let border = NSBezierPath(rect: bounds.insetBy(dx: 0.5, dy: 0.5))
-        border.lineWidth = 1
-        border.stroke()
+        guard border.isVisible else { return }
+        border.nsColor.setStroke()
+        let width = CGFloat(border.width)
+        let outline = NSBezierPath(rect: bounds.insetBy(dx: width / 2, dy: width / 2))
+        outline.lineWidth = width
+        outline.stroke()
     }
 
-    func showZoomBadge(_ zoom: CGFloat) {
-        badge.stringValue = " \(Int((zoom * 100).rounded()))% "
+    /// Shows the scale, or width × height when the pin was stretched.
+    func showZoomBadge(_ zoom: CGFloat, _ heightZoom: CGFloat? = nil) {
+        let percent = { (value: CGFloat) in "\(Int((value * 100).rounded()))%" }
+        let height = heightZoom ?? zoom
+        badge.stringValue = abs(height - zoom) < 0.005 ? " \(percent(zoom)) " : " \(percent(zoom)) × \(percent(height)) "
         badge.isHidden = bounds.width < 60 || bounds.height < 24
         badgeTimer?.invalidate()
         badgeTimer = Timer.scheduledTimer(withTimeInterval: 0.9, repeats: false) { [weak self] _ in
@@ -848,16 +956,39 @@ final class PinnedImageView: NSView {
 
     @objc private func zoomOut() { pinnedWindow?.zoom(by: 1 / Self.step) }
 
-    @objc private func actualSize() { pinnedWindow?.setZoom(1) }
+    @objc private func actualSize() { pinnedWindow?.resetToActualSize() }
 
     // MARK: Mouse and keys
 
     override func mouseDown(with event: NSEvent) {
+        resizeDrag = nil
         if event.clickCount >= 2 {
             window?.close()
+        } else if let window,
+                  let (handle, _) = PinnedImageResize.regions(in: bounds).first(where: {
+                      $0.1.contains(convert(event.locationInWindow, from: nil))
+                  }) {
+            resizeDrag = (handle, window.frame, window.convertPoint(toScreen: event.locationInWindow))
         } else {
             window?.performDrag(with: event)
         }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let resizeDrag, let window else { return }
+        let point = window.convertPoint(toScreen: event.locationInWindow)
+        let delta = CGPoint(x: point.x - resizeDrag.start.x, y: point.y - resizeDrag.start.y)
+        // Edges stretch one side; corners scale evenly unless ⇧ is held.
+        let isCorner = (resizeDrag.handle.affectsLeft || resizeDrag.handle.affectsRight)
+            && (resizeDrag.handle.affectsTop || resizeDrag.handle.affectsBottom)
+        let keepAspect = isCorner && !event.modifierFlags.contains(.shift)
+        pinnedWindow?.resize(to: PinnedImageResize.frame(from: resizeDrag.frame, handle: resizeDrag.handle, delta: delta, keepAspect: keepAspect))
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        resizeDrag = nil
+        window?.invalidateCursorRects(for: self)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -940,9 +1071,10 @@ final class PreferencesView: NSView {
             L("Drag inside to move; drag an edge or handle to resize", "拖动选区内部移动，拖动边框或控制点调整大小"),
             L("Double-click the selection or press Enter to finish and copy", "双击选区或按 Enter：完成并复制到剪贴板"),
             L("Esc: cancel capture; right-click: select a new region", "Esc：退出截图；右键：重新选择区域"),
-            L("\(AppChannel.editImageHotKey.symbol): edit image; ⌘Z: undo; ⌘S: save; Delete: remove the selected annotation", "\(AppChannel.editImageHotKey.symbol) 编辑图片，⌘Z 撤销，⌘S 保存，Delete 删除选中的标注"),
+            L("\(AppChannel.editImageHotKey.symbol): edit image; \(ToolShortcuts.symbol(.undo)): undo; \(ToolShortcuts.symbol(.save)): save; Delete: remove the selected annotation",
+              "\(AppChannel.editImageHotKey.symbol) 编辑图片，\(ToolShortcuts.symbol(.undo)) 撤销，\(ToolShortcuts.symbol(.save)) 保存，Delete 删除选中的标注"),
             L("Arrow keys: adjust selection (hold Shift for 10-point steps)", "方向键微调选区（按住 Shift 每次 10 点）"),
-            L("Pinned images: scroll or pinch to zoom, ⌘0 for actual size; double-click or Esc to close", "钉图：滚轮或双指缩放，⌘0 原始大小；双击或 Esc 关闭"),
+            L("Pinned images: drag edges to resize, scroll or pinch to zoom, ⌘0 for actual size; double-click or Esc to close", "钉图：拖动边缘或滚轮/双指缩放，⌘0 原始大小；双击或 Esc 关闭"),
             L("Pin shortcut: ", "钉图快捷键：") + HotKeyCenter.shared.pinHotKey.description + L(" (pins the latest screenshot)", "（钉住刚完成的截图）")
         ]
 
@@ -1026,7 +1158,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
     }
     private var mosaicStyle = MosaicStyle.current
     private var usesMosaicStyle: Bool {
-        selectedTool == .mosaic || selectedAnnotationIndex.map { annotations.indices.contains($0) && annotations[$0].kind == .mosaic } == true
+        selectedTool == .mosaic || selectedAnnotationIndex.map { annotations.indices.contains($0) && annotations[$0].isStylableMosaic } == true
     }
     private var annotations: [Annotation] = []
     private var draftAnnotation: Annotation?
@@ -1199,7 +1331,8 @@ final class CaptureView: NSView, NSTextFieldDelegate {
                 text += L(" · Drag to draw", " · 拖动绘制")
             }
         } else {
-            text += L("  · Select / Move (V)", "  · 选择 / 移动 (V)")
+            let key = ToolShortcuts.hotKey(for: ToolShortcuts.select).key
+            text += L("  · Select / Move (\(key))", "  · 选择 / 移动 (\(key))")
         }
         let attrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular),
@@ -1407,7 +1540,9 @@ final class CaptureView: NSView, NSTextFieldDelegate {
             return width + buttonSize
         }
         let barHeight = buttonSize + padding * 2
-        let showsOptions = selectedTool != nil || selectedAnnotationIndex != nil
+        // Erasing has no color or size to pick.
+        let showsOptions = (selectedTool != nil && selectedTool != .erase)
+            || selectedAnnotationIndex.map { annotations.indices.contains($0) && annotations[$0].effectiveMosaicStyle != .eraseBox } == true
         let needed = gap + barHeight + (showsOptions ? optionsGap + optionsHeight : 0)
 
         let x = min(max(selection.maxX - barWidth, bounds.minX + 4), bounds.maxX - barWidth - 4)
@@ -1440,7 +1575,9 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         let separatorWidth: CGFloat = 13
         let geometry = toolbarGeometry(for: selection)
         let bar = geometry.bar
-        let showsOptions = selectedTool != nil || selectedAnnotationIndex != nil
+        // Erasing has no color or size to pick.
+        let showsOptions = (selectedTool != nil && selectedTool != .erase)
+            || selectedAnnotationIndex.map { annotations.indices.contains($0) && annotations[$0].effectiveMosaicStyle != .eraseBox } == true
         drawPanel(bar)
 
         var cursorX = bar.minX + padding
@@ -1658,7 +1795,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         case .mosaicAppearance:
             guard let rect = toolbarButtons.first(where: { $0.action == action })?.rect else { return }
             let menu = NSMenu()
-            for style in MosaicStyle.allCases {
+            for style in MosaicStyle.mosaicStyles {
                 let item = NSMenuItem(title: style.title, action: #selector(pickMosaicStyle(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = style.rawValue
@@ -1847,7 +1984,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
                 stepStyle = annotations[index].stepStyle ?? .filledCircle
             }
             if annotations[index].kind == .text { textStyle = annotations[index].effectiveTextStyle }
-            if annotations[index].kind == .mosaic { mosaicStyle = annotations[index].effectiveMosaicStyle }
+            if annotations[index].isStylableMosaic { mosaicStyle = annotations[index].effectiveMosaicStyle }
             dragState = .movingAnnotation(index: index, lastPoint: point)
             needsDisplay = true
             return
@@ -2057,6 +2194,14 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         let step: CGFloat = event.modifierFlags.contains(.shift) ? 10 : 1
 
         if handleAnnotationShortcut(event) { return }
+        // Customizable toolbar shortcuts first; Esc and Enter always keep working as cancel and done.
+        if ToolShortcuts.matches(.cancel, event) { cancel(); return }
+        if ToolShortcuts.matches(.done, event) { finish(.copy); return }
+        if ToolShortcuts.matches(.editImage, event) { editImage(); return }
+        if ToolShortcuts.matches(.save, event) { finish(.save); return }
+        if ToolShortcuts.matches(.undo, event) { undo(); return }
+        if ToolShortcuts.matches(.pin, event) { finish(.pin); return }
+        if ToolShortcuts.matches(.scroll, event) { finish(.scroll); return }
 
         switch Int(event.keyCode) {
         case kVK_Escape:
@@ -2067,16 +2212,6 @@ final class CaptureView: NSView, NSTextFieldDelegate {
             if let format = Self.colorCopyFormat(for: event) { copyColorValue(format: format) }
         case kVK_ANSI_C where command:
             copyCurrentContent()
-        case kVK_ANSI_E where AppChannel.matchesEditImageShortcut(event):
-            editImage()
-        case kVK_ANSI_S where command:
-            finish(.save)
-        case kVK_ANSI_Z where command:
-            undo()
-        case kVK_ANSI_T where event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command:
-            finish(.pin)
-        case kVK_ANSI_L where event.modifierFlags.intersection([.command, .option, .control, .shift]) == .command:
-            finish(.scroll)
         case kVK_Delete, kVK_ForwardDelete:
             deleteSelectedAnnotation()
         case kVK_LeftArrow:
@@ -2101,11 +2236,11 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         if let tool = ToolKind.matchingShortcut(event) {
             selectedTool = tool
             selectedAnnotationIndex = nil
+        } else if event.keyCode == ToolShortcuts.selectKeyCode {
+            perform(.select)
+            return true
         } else {
             switch Int(event.keyCode) {
-            case kVK_ANSI_V:
-                perform(.select)
-                return true
             case kVK_ANSI_1: perform(.size(0))
             case kVK_ANSI_2: perform(.size(1))
             case kVK_ANSI_3: perform(.size(2))
@@ -2150,9 +2285,11 @@ final class CaptureView: NSView, NSTextFieldDelegate {
     }
 
     private func makeAnnotation(_ tool: ToolKind, from start: CGPoint, to end: CGPoint) -> Annotation {
-        var annotation = Annotation(kind: tool, rect: .zero, points: [start, end], color: selectedColor, sizeLevel: sizeLevel)
+        let kind: ToolKind = tool == .erase ? .mosaic : tool
+        var annotation = Annotation(kind: kind, rect: .zero, points: [start, end], color: selectedColor, sizeLevel: sizeLevel)
         if tool == .mosaic { annotation.mosaicStyle = mosaicStyle }
-        switch tool {
+        if tool == .erase { annotation.mosaicStyle = .eraseBox }
+        switch kind {
         case .mosaic where mosaicStyle.isBox:
             annotation.rect = normalizedRect(from: start, to: end)
         case .pen, .mosaic:
@@ -2168,7 +2305,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         guard var draft = draftAnnotation else { return }
         switch draft.kind {
         case .mosaic where draft.isBoxMosaic:
-            draft = makeAnnotation(.mosaic, from: draft.points.first ?? point, to: point)
+            draft = makeAnnotation(draft.effectiveMosaicStyle == .eraseBox ? .erase : .mosaic, from: draft.points.first ?? point, to: point)
         case .pen, .mosaic:
             draft.points.append(point)
             draft.rect = boundingRect(for: draft.points).insetBy(dx: -draft.lineWidth / 2, dy: -draft.lineWidth / 2)
@@ -2314,7 +2451,7 @@ final class CaptureView: NSView, NSTextFieldDelegate {
         guard let index = selectedAnnotationIndex, annotations.indices.contains(index) else { return }
         annotations[index].color = selectedColor
         annotations[index].sizeLevel = sizeLevel
-        if annotations[index].kind == .mosaic { annotations[index].restyleMosaic(mosaicStyle) }
+        if annotations[index].isStylableMosaic { annotations[index].restyleMosaic(mosaicStyle) }
         if annotations[index].kind == .step || annotations[index].stepNumber != nil {
             annotations[index].stepStyle = stepStyle
             if annotations[index].kind == .step { StepMarkers.resize(&annotations[index]) }
@@ -2491,15 +2628,23 @@ enum ToolbarAction: Equatable {
         case .stepAppearance: return L("Number style", "编号样式")
         case .mosaicAppearance: return L("Mosaic style", "马赛克样式")
         case .numberRect: return L("Automatically number rectangles", "矩形标注自动编号")
-        case .select: return L("Select / Move (V)", "选择 / 移动（V）")
+        case .select:
+            let key = ToolShortcuts.hotKey(for: ToolShortcuts.select).key
+            return L("Select / Move (\(key))", "选择 / 移动（\(key)）")
         case .tool(let tool): return "\(tool.title) (\(tool.shortcut))"
-        case .scroll: return L("Scrolling Capture (⌘L)", "长截图（⌘L）")
+        case .scroll: return L("Scrolling Capture (\(ToolShortcuts.symbol(.scroll)))", "长截图（\(ToolShortcuts.symbol(.scroll))）")
         case .editImage: return L("Edit Image (\(AppChannel.editImageHotKey.symbol))", "编辑图片（\(AppChannel.editImageHotKey.symbol)）")
-        case .undo: return L("Undo (⌘Z)", "撤销（⌘Z）")
-        case .pin: return L("Pin to Screen (⌘T)", "钉在屏幕上（⌘T）")
-        case .save: return L("Save (⌘S)", "保存（⌘S）")
-        case .cancel: return L("Cancel Capture (Esc)", "退出截图（Esc）")
-        case .done: return L("Done (Enter / ⌘C)", "完成（Enter / ⌘C）")
+        case .undo: return L("Undo (\(ToolShortcuts.symbol(.undo)))", "撤销（\(ToolShortcuts.symbol(.undo))）")
+        case .pin: return L("Pin to Screen (\(ToolShortcuts.symbol(.pin)))", "钉在屏幕上（\(ToolShortcuts.symbol(.pin))）")
+        case .save: return L("Save (\(ToolShortcuts.symbol(.save)))", "保存（\(ToolShortcuts.symbol(.save))）")
+        case .cancel:
+            let key = ToolShortcuts.hotKey(for: ToolShortcuts.Action.cancel.rawValue)
+            return key.keyCode == UInt32(kVK_Escape) && key.modifiers == 0
+                ? L("Cancel Capture (Esc)", "退出截图（Esc）") : L("Cancel Capture (\(key.symbol) / Esc)", "退出截图（\(key.symbol) / Esc）")
+        case .done:
+            let key = ToolShortcuts.hotKey(for: ToolShortcuts.Action.done.rawValue)
+            return key.keyCode == UInt32(kVK_Return) && key.modifiers == 0
+                ? L("Done (Enter / ⌘C)", "完成（Enter / ⌘C）") : L("Done (\(key.symbol) / Enter / ⌘C)", "完成（\(key.symbol) / Enter / ⌘C）")
         case .size, .color: return nil
         }
     }
@@ -2612,7 +2757,7 @@ enum AnnotationRenderer {
             drawText(annotation)
         case .step:
             StepMarkers.draw(annotation, in: context)
-        case .mosaic:
+        case .mosaic, .erase:
             drawMosaic(annotation, in: context, sourceImage: sourceImage, origin: origin, localImage: localImage, desktopBounds: desktopBounds)
         }
 
@@ -2687,6 +2832,26 @@ enum AnnotationRenderer {
             context.fill(rect)
             return
         }
+        if style == .eraseBox {
+            let fill = MosaicCache.eraseColor(for: rect, source: sourceImage) {
+                // Sample a 3 pt ring outside the box, from the local image or from the desktop capture.
+                let outer = rect.insetBy(dx: -3, dy: -3)
+                if localImage {
+                    guard let cgImage = sourceImage.cgImage(forProposedRect: nil, context: nil, hints: nil), sourceImage.size.width > 0 else { return nil }
+                    let scale = CGFloat(cgImage.width) / sourceImage.size.width
+                    let pixels = CGRect(x: outer.minX * scale, y: (sourceImage.size.height - outer.maxY) * scale,
+                                        width: outer.width * scale, height: outer.height * scale)
+                        .integral.intersection(CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+                    return cgImage.cropping(to: pixels).map { ($0, Int((3 * scale).rounded())) }
+                }
+                guard let crop = ScreenCapture.crop(image: sourceImage, to: outer.offsetBy(dx: origin.x, dy: origin.y), desktopBounds: desktopBounds),
+                      let cgImage = crop.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+                return (cgImage, Int((3 * CGFloat(cgImage.width) / outer.width).rounded()))
+            }
+            context.setFillColor(fill.cgColor)
+            context.fill(rect)
+            return
+        }
         guard let filtered = MosaicCache.image(for: annotation, source: sourceImage) else { return }
         NSGraphicsContext.current?.imageInterpolation = style == .blurBox || style == .frostedBox ? .high : .none
         if localImage {
@@ -2758,17 +2923,32 @@ struct DesktopSnapshot {
 
 @MainActor
 enum ScreenCapture {
-    static func captureAllScreens() -> DesktopSnapshot? {
-        let union = screenUnion()
-        guard !union.isNull else { return nil }
-
-        let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
-        let captureRect = DesktopGeometry.captureRect(for: union, primaryHeight: primaryHeight)
-        guard let cgImage = CGWindowListCreateImage(captureRect, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution]) else {
+    static func captureAllScreens() async -> [DesktopSnapshot]? {
+        // Keep each display's own pixels. A desktop-wide bitmap has only one
+        // scale and cannot represent both Retina and 1x displays without resampling.
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return nil }
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            var snapshots: [DesktopSnapshot] = []
+            for screen in screens {
+                guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber,
+                      let display = content.displays.first(where: { $0.displayID == number.uint32Value }) else { return nil }
+                let filter = SCContentFilter(display: display, excludingWindows: [])
+                let configuration = SCStreamConfiguration()
+                configuration.width = Int((filter.contentRect.width * CGFloat(filter.pointPixelScale)).rounded())
+                configuration.height = Int((filter.contentRect.height * CGFloat(filter.pointPixelScale)).rounded())
+                configuration.showsCursor = false
+                configuration.pixelFormat = kCVPixelFormatType_32BGRA
+                configuration.captureResolution = .best
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+                snapshots.append(DesktopSnapshot(image: NSImage(cgImage: image, size: screen.frame.size), bounds: screen.frame))
+            }
+            return snapshots
+        } catch {
+            log("screen capture failed", error: error)
             return nil
         }
-
-        return DesktopSnapshot(image: NSImage(cgImage: cgImage, size: union.size), bounds: union)
     }
 
     static func render(image: NSImage, result: CaptureResult, desktopBounds: CGRect? = nil) -> NSImage? {
@@ -2843,7 +3023,7 @@ extension Annotation {
         case .step:
             let radius = annotationRadius
             return hypot(point.x - rect.midX, point.y - rect.midY) <= radius + 4
-        case .text, .mosaic:
+        case .text, .mosaic, .erase:
             return rect.insetBy(dx: -4, dy: -4).contains(point)
         case .rect:
             if stepNumber != nil, StepMarkers.badgeRect(for: self).contains(point) { return true }
@@ -3013,8 +3193,32 @@ enum ScreenRecordingPermission {
         NSWorkspace.shared.open(url)
     }
 
+    private static let requestedKey = "permissions.screenRecording.requested"
+
+    /// Whether Snapok has asked before; macOS shows its prompt only once, then stays silent.
+    static var wasRequested: Bool { UserDefaults.standard.bool(forKey: requestedKey) }
+
+    /// After the system prompt has been used up: how to enable access, with a way to reopen Snapok so it applies.
+    static func explainMissingAccess() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = L("Allow Screen Recording to take screenshots", "需要开启屏幕录制权限才能截图")
+        alert.informativeText = L(
+            "Open System Settings → Privacy & Security → Screen & System Audio Recording, turn on \(AppChannel.displayName), then reopen Snapok. Screenshots stay on your Mac.",
+            "打开「系统设置 → 隐私与安全性 → 录屏与系统录音」，开启 \(AppChannel.displayName)，然后重新打开 Snapok。截图只保存在本机。")
+        alert.addButton(withTitle: L("Open System Settings", "打开系统设置"))
+        alert.addButton(withTitle: L("Reopen Snapok", "已开启，重新打开 Snapok"))
+        alert.addButton(withTitle: L("Cancel", "取消"))
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: openSettings()
+        case .alertSecondButtonReturn: AppRelauncher.relaunch()
+        default: break
+        }
+    }
+
     static func request() async -> Bool {
         if CGPreflightScreenCaptureAccess() { return true }
+        UserDefaults.standard.set(true, forKey: requestedKey)
         NSApp.activate(ignoringOtherApps: true)
         // Let activation reach the window server before asking for consent.
         await Task.yield()

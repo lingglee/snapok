@@ -3,11 +3,13 @@ import Security
 
 /// User-facing settings backed by UserDefaults. The API key lives in the Keychain, not here.
 enum AppSettings {
-    static var reuseEditorStyle: Bool {
-        get { defaults.bool(forKey: "capture.reuseEditorStyle") }
-        set { defaults.set(newValue, forKey: "capture.reuseEditorStyle") }
-    }
     private static var defaults: UserDefaults { .standard }
+
+    /// Copy finished screenshots framed in the last editing style; the paste-styled shortcut then pastes the plain one.
+    static var copyStyled: Bool {
+        get { defaults.object(forKey: "capture.copyStyled") as? Bool ?? false }
+        set { defaults.set(newValue, forKey: "capture.copyStyled") }
+    }
 
     static var autoSave: Bool {
         get { defaults.object(forKey: "history.autoSave") as? Bool ?? true }
@@ -26,16 +28,17 @@ enum AppSettings {
         set { defaults.set(newValue, forKey: "ai.translateTarget") }
     }
 
-    /// Whether「敏感信息打码」also masks chat avatars and user names; on by default.
-    static var redactChatIdentity: Bool {
-        get { defaults.object(forKey: "ai.redactChatIdentity") as? Bool ?? true }
-        set { defaults.set(newValue, forKey: "ai.redactChatIdentity") }
-    }
-
     /// Sends each new screenshot to the AI service for a title and tags; off until the user opts in.
     static var autoName: Bool {
         get { defaults.bool(forKey: "ai.autoName") }
         set { defaults.set(newValue, forKey: "ai.autoName") }
+    }
+
+    /// Whether Snapok Agent plans with the user's own model (free) before Snapok Cloud (credits); on by default.
+    /// Off, a signed-in user plans on Snapok Cloud; signed out, the own model is still used.
+    static var agentUsesOwnModel: Bool {
+        get { defaults.object(forKey: "ai.agentUsesOwnModel") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "ai.agentUsesOwnModel") }
     }
 
     /// The single Anthropic key of earlier builds; `ModelsStore` moves it into a provider on first use.
@@ -131,6 +134,8 @@ struct HistoryItem: Codable {
     var ocrText: String
     var annotations: [Annotation]
     var backgroundStyle: BackgroundPreferences? = nil
+    /// The app the capture was taken from, when known; names the item when no model is available.
+    var appName: String? = nil
 
     var displayTitle: String {
         if !title.isEmpty { return title }
@@ -286,7 +291,7 @@ final class HistoryStore {
 
     /// Records a finished capture. Returns nil when auto-save is off or the write fails.
     @discardableResult
-    func add(original: NSImage, annotations: [Annotation], style: CaptureStyle? = nil) -> HistoryItem? {
+    func add(original: NSImage, annotations: [Annotation], style: CaptureStyle? = nil, appName: String? = nil) -> HistoryItem? {
         guard AppSettings.autoSave,
               let cgImage = original.cgImage(forProposedRect: nil, context: nil, hints: nil),
               let png = original.pngData else { return nil }
@@ -299,7 +304,8 @@ final class HistoryStore {
             title: "",
             tags: [],
             ocrText: "",
-            annotations: annotations
+            annotations: annotations,
+            appName: appName
         )
         do {
             try FileManager.default.createDirectory(at: folder(item.id), withIntermediateDirectories: true)
@@ -320,10 +326,16 @@ final class HistoryStore {
         return item
     }
 
-    /// Saves a translated derivative without overwriting its source or running AI naming again.
-    /// Explicit saves work even when automatic screenshot saving is disabled.
     @discardableResult
     func saveTranslation(png: Data, target: String, text: String, replacing id: UUID? = nil) throws -> UUID {
+        try saveDerivative(png: png, title: L("Translated Image · \(target)", "翻译图片 · \(target)"),
+                           tags: ["translation", target], text: text, replacing: id)
+    }
+
+    /// Saves an image derived from another one (a translation, an AI edit) without overwriting its source
+    /// or running AI naming again. Explicit saves work even when automatic screenshot saving is disabled.
+    @discardableResult
+    func saveDerivative(png: Data, title: String, tags: [String], text: String, replacing id: UUID? = nil) throws -> UUID {
         guard let bitmap = NSBitmapImageRep(data: png), let cgImage = bitmap.cgImage else {
             throw CocoaError(.fileReadCorruptFile)
         }
@@ -332,8 +344,7 @@ final class HistoryStore {
         let index = id.flatMap { savedID in items.firstIndex { $0.id == savedID } }
         var item = index.map { items[$0] } ?? HistoryItem(
             id: UUID(), createdAt: Date(), pointSize: size, pixelSize: size,
-            title: L("Translated Image · \(target)", "翻译图片 · \(target)"),
-            tags: ["translation", target], ocrText: text, annotations: [])
+            title: title, tags: tags, ocrText: text, annotations: [])
         item.ocrText = text
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601

@@ -22,6 +22,15 @@ enum AppChannel {
             : HotKey(keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(shiftKey | optionKey), key: "A")
     }
 
+    /// First-launch screenshot shortcuts, tried in order until one is free (⌃⌘A is also WeChat's and QQ's).
+    /// Development keeps ⇧⌥A so it can run beside the release build.
+    static var captureHotKeyCandidates: [HotKey] {
+        guard isRelease else { return [defaultHotKey] }
+        return [defaultHotKey,
+                HotKey(keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(optionKey | cmdKey), key: "A"),
+                HotKey(keyCode: UInt32(kVK_ANSI_A), modifiers: UInt32(shiftKey | cmdKey), key: "A")]
+    }
+
     /// ⌃⌘T for release, ⇧⌥T for development (matching ⌘T, which pins inside the capture overlay).
     static var defaultPinHotKey: HotKey {
         isRelease
@@ -29,7 +38,16 @@ enum AppChannel {
             : HotKey(keyCode: UInt32(kVK_ANSI_T), modifiers: UInt32(shiftKey | optionKey), key: "T")
     }
 
-    static var editImageHotKey: HotKey { editImageHotKey(forRelease: isRelease) }
+    /// ⇧⌘V for release, ⇧⌥V for development. Registered only for a while after a screenshot, so ⇧⌘V
+    /// ("Paste and Match Style" in many apps) keeps working the rest of the time.
+    static var defaultPasteStyledHotKey: HotKey {
+        isRelease
+            ? HotKey(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(shiftKey | cmdKey), key: "V")
+            : HotKey(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(shiftKey | optionKey), key: "V")
+    }
+
+    /// The edit-image shortcut, customizable in settings; defaults to `editImageHotKey(forRelease:)`.
+    static var editImageHotKey: HotKey { ToolShortcuts.hotKey(for: ToolShortcuts.Action.editImage.rawValue) }
 
     static func editImageHotKey(forRelease release: Bool) -> HotKey {
         HotKey(keyCode: UInt32(kVK_ANSI_E), modifiers: UInt32(release ? cmdKey : optionKey), key: "E")

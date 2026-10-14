@@ -46,6 +46,9 @@ struct BackgroundLayout {
     var borderColor: NSColor = .white
     var watermark: BackgroundWatermark?
 
+    /// The screenshot as captured: no padding, corners, shadow, border, or watermark.
+    static let plain = BackgroundLayout(horizontalPadding: 0, verticalPadding: 0, cornerRadius: 0, shadow: false, borderWidth: 0)
+
     func canvasSize(for source: CGSize) -> CGSize {
         CGSize(width: source.width + horizontalPadding * 2, height: source.height + verticalPadding * 2)
     }
@@ -120,7 +123,7 @@ enum BackgroundRenderer {
 @MainActor
 struct BackgroundWatermark {
     enum Position: Int, CaseIterable {
-        case topLeft, top, topRight, left, center, right, bottomLeft, bottom, bottomRight, tiled
+        case topLeft, top, topRight, left, center, right, bottomLeft, bottom, bottomRight, tiled, custom
     }
 
     var text: String
@@ -130,6 +133,8 @@ struct BackgroundWatermark {
     var color: NSColor = .white
     var opacity: CGFloat = 0.6
     var position: Position = .bottomRight
+    /// Where a `.custom` watermark is centred, as fractions of the canvas from the bottom left.
+    var center: CGPoint?
 
     /// nil when the watermark is off or has nothing to draw.
     init?(preferences: BackgroundPreferences.Watermark?) {
@@ -141,6 +146,7 @@ struct BackgroundWatermark {
         color = NSColor(srgbRed: value.color[0], green: value.color[1], blue: value.color[2], alpha: value.color[3])
         opacity = CGFloat(value.opacity)
         position = Position(rawValue: value.position) ?? .bottomRight
+        center = value.center.map { CGPoint(x: $0[0], y: $0[1]) }
     }
 
     init(text: String, fontFamily: String? = nil, bold: Bool = false, fontSize: CGFloat = 32,
@@ -175,6 +181,13 @@ struct BackgroundWatermark {
     /// Where the text box lands. Edge positions sit centred in the padding band when it is
     /// tall enough, otherwise inset from the canvas edge.
     func frame(textSize: CGSize, canvas: CGRect, photo: CGRect) -> CGRect {
+        if position == .custom {
+            // Kept whole on the canvas whatever the padding becomes.
+            let center = center ?? CGPoint(x: 0.5, y: 0.5)
+            let x = min(max(canvas.minX + center.x * canvas.width - textSize.width / 2, canvas.minX), canvas.maxX - textSize.width)
+            let y = min(max(canvas.minY + center.y * canvas.height - textSize.height / 2, canvas.minY), canvas.maxY - textSize.height)
+            return CGRect(origin: CGPoint(x: x, y: y), size: textSize)
+        }
         let margin = max(fontSize * 0.6, 8)
         let column = position.rawValue % 3, row = position.rawValue / 3
         let x: CGFloat
@@ -195,12 +208,22 @@ struct BackgroundWatermark {
         return CGRect(origin: CGPoint(x: x, y: y), size: textSize)
     }
 
-    func draw(in canvas: CGRect, photo: CGRect) {
+    private var string: NSAttributedString? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, opacity > 0, fontSize > 0 else { return }
+        guard !trimmed.isEmpty, opacity > 0, fontSize > 0 else { return nil }
         let string = NSAttributedString(string: trimmed, attributes: attributes)
+        return string.size().width > 0 && string.size().height > 0 ? string : nil
+    }
+
+    /// The single text box on the canvas; nil when tiled or empty.
+    func textFrame(canvas: CGRect, photo: CGRect) -> CGRect? {
+        guard position != .tiled, let string else { return nil }
+        return frame(textSize: string.size(), canvas: canvas, photo: photo)
+    }
+
+    func draw(in canvas: CGRect, photo: CGRect) {
+        guard let string else { return }
         let size = string.size()
-        guard size.width > 0, size.height > 0 else { return }
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(rect: canvas).addClip()
         if position == .tiled {

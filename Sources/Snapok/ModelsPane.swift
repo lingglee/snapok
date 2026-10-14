@@ -122,24 +122,39 @@ final class ModelsPane: SectionedPageView {
 /// Settings → AI Features: what the default model is used for.
 @MainActor
 final class AIFeaturesPane: SectionedPageView {
-    private let autoName = NSButton(checkboxWithTitle: L("Automatically title and tag new screenshots (sends images to the default model)",
-                                                         "截图后自动起标题、打标签（会把截图发送给默认模型）"), target: nil, action: nil)
+    private let autoName = NSButton(checkboxWithTitle: L("Automatically title and tag new screenshots (never uses credits)",
+                                                         "截图后自动起标题、打标签（不消耗积分）"), target: nil, action: nil)
+    private let agentOwnModel = NSButton(checkboxWithTitle: L("Snapok Agent uses my default model (free); off, it uses Snapok Cloud when signed in (credits)",
+                                                              "Snapok Agent 使用我配置的默认模型（免费）；关闭后，登录时改用 Snapok 云端（消耗积分）"), target: nil, action: nil)
 
     init() {
         super.init(title: L("AI Features", "AI 功能"))
         autoName.target = self
         autoName.action = #selector(save)
         autoName.cell?.wraps = true
-        let autoNameRow = NSStackView(views: [autoName])
-        autoNameRow.edgeInsets = NSEdgeInsets(top: 12, left: 18, bottom: 12, right: 18)
-        let rows = [autoNameRow]
+        agentOwnModel.target = self
+        agentOwnModel.action = #selector(save)
+        agentOwnModel.cell?.wraps = true
+        let rows = [autoName, agentOwnModel].map { checkbox -> NSView in
+            let row = NSStackView(views: [checkbox])
+            row.edgeInsets = NSEdgeInsets(top: 12, left: 18, bottom: 12, right: 18)
+            return row
+        }
         let list = NSStackView()
         list.orientation = .vertical
         list.spacing = 0
         Self.fill(list, with: rows)
         add(Self.card(list, inset: NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)))
-        add(Self.footnote(L("Translation, questions, and automatic naming use the default model from Models. Choose a target language when translating. Text recognition and redaction always run on this Mac.",
-                            "翻译、提问和自动命名使用「模型」里的默认模型；翻译时选择目标语言；文字识别和敏感信息打码始终在本机完成。")), spacingBefore: 8)
+        // One line per feature, so it reads as a list rather than a paragraph.
+        let notes = [
+            L("Translation: your default model, else on-device translation (macOS 26 and later), else Snapok Cloud.",
+              "翻译：优先用默认模型，其次用系统翻译（macOS 26 起），再次用 Snapok 云端。"),
+            L("Automatic naming: your default model (it receives the screenshot), else Apple's on-device model, else the app name and first line of text.",
+              "自动命名：优先用默认模型（会发送截图），其次用系统本机模型，否则按来源应用和截图第一行文字命名。"),
+            L("Generating images in Snapok Agent always runs on Snapok Cloud.", "Snapok Agent 生成图片：始终在 Snapok 云端完成。"),
+            L("Text recognition and redaction always run on this Mac.", "文字识别和打码：始终在本机完成。")
+        ]
+        add(Self.footnote(notes.map { "• " + $0 }.joined(separator: "\n")), spacingBefore: 8)
         load()
     }
 
@@ -147,10 +162,14 @@ final class AIFeaturesPane: SectionedPageView {
 
     func load() {
         autoName.state = AppSettings.autoName ? .on : .off
+        agentOwnModel.state = AppSettings.agentUsesOwnModel ? .on : .off
     }
 
     @objc private func save() {
         AppSettings.autoName = autoName.state == .on
+        AppSettings.agentUsesOwnModel = agentOwnModel.state == .on
+        // The Snapok Agent page re-checks which model plans its turns.
+        NotificationCenter.default.post(name: ModelsStore.didChange, object: nil)
     }
 }
 

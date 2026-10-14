@@ -1,36 +1,47 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleDevelopmentRegion</key>
-  <string>en</string>
-  <key>CFBundleExecutable</key>
-  <string>Snapok</string>
-  <key>CFBundleIdentifier</key>
-  <string>ai.thinkany.snapok</string>
-  <key>CFBundleInfoDictionaryVersion</key>
-  <string>6.0</string>
-  <key>CFBundleName</key>
-  <string>Snapok</string>
-  <key>CFBundleDisplayName</key>
-  <string>Snapok</string>
-  <key>SnapokChannel</key>
-  <string>release</string>
-  <key>CFBundleIconFile</key>
-  <string>AppIcon</string>
-  <key>CFBundlePackageType</key>
-  <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>0.1.8</string>
-  <key>CFBundleVersion</key>
-  <string>1</string>
-  <key>LSMinimumSystemVersion</key>
-  <string>14.0</string>
-  <key>LSUIElement</key>
-  <false/>
-  <key>NSHumanReadableCopyright</key>
-  <string>Copyright © 2026 Snapok.</string>
-  <key>NSScreenCaptureDescription</key>
-  <string>Snapok needs screen capture access to let you select, annotate, copy, save, and pin screenshots.</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Snapok</string>
+	<key>CFBundleExecutable</key>
+	<string>Snapok</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>ai.thinkany.snapok</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Snapok</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>ai.thinkany.snapok</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>snapok</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<false/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Snapok.</string>
+	<key>NSScreenCaptureDescription</key>
+	<string>Snapok needs screen capture access to let you select, annotate, copy, save, and pin screenshots.</string>
+	<key>SnapokChannel</key>
+	<string>release</string>
 </dict>
 </plist>

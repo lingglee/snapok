@@ -80,6 +80,15 @@ class PageView: NSView {
         return field
     }
 
+    /// A gray note under a setting that wraps instead of widening the form.
+    static func wrappingHint(_ text: String, width: CGFloat = 360) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: text)
+        field.font = .systemFont(ofSize: 12)
+        field.textColor = .secondaryLabelColor
+        field.preferredMaxLayoutWidth = width
+        return field
+    }
+
     static func form(_ rows: [[NSView]]) -> NSGridView {
         let grid = NSGridView(views: rows)
         grid.rowSpacing = 14
@@ -127,8 +136,8 @@ final class CardView: NSView {
 
 @MainActor
 final class GeneralSettingsPane: PageView {
+    private let copyStyled = NSButton(checkboxWithTitle: L("Copy screenshots in your last editing style", "复制截图时套用上次编辑的样式"), target: nil, action: nil)
     private let autoSave = NSButton(checkboxWithTitle: L("Automatically save screenshots to the library", "截图后自动保存到截图库"), target: nil, action: nil)
-    private let reuseEditorStyle = NSButton(checkboxWithTitle: L("Use the last image editing style for new screenshots", "新截图沿用上次编辑图片的样式"), target: nil, action: nil)
     private let retention = NSPopUpButton()
     private let language = NSPopUpButton()
     private let theme = NSPopUpButton()
@@ -137,6 +146,8 @@ final class GeneralSettingsPane: PageView {
     private let captureWidth = PixelNumberControl(value: 2, range: CaptureAppearance.borderWidthRange, label: L("Screenshot selection thickness", "截图选框粗细"))
     private let captureOpacity = PixelNumberControl(value: 100, range: 0...100, label: L("Screenshot selection opacity", "截图选框不透明度"), unit: "%")
     private let capturePreview = CaptureAppearancePreview()
+    private let pinColor = ClearableColorWell()
+    private let pinWidth = PixelNumberControl(value: 1, range: PinBorder.widthRange, label: L("Pinned image border thickness", "钉图边框粗细"))
     private let libraryLocation = NSTextField(labelWithString: "")
     private let restoreLibraryLocation = NSButton(title: L("Restore Default", "恢复默认"), target: nil, action: nil)
     private let operationFeedback = WindowFeedback()
@@ -148,7 +159,7 @@ final class GeneralSettingsPane: PageView {
     private let retentionOptions: [(title: String, days: Int)] = [(L("7 days", "7 天"), 7), (L("30 days", "30 天"), 30), (L("90 days", "90 天"), 90), (L("Forever", "永久"), 0)]
 
     init() {
-        super.init(title: L("General", "通用设置"), subtitle: L("Appearance, language, shortcuts, and screenshot storage preferences.", "外观、语言、快捷键与截图库保存方式。"))
+        super.init(title: L("General", "通用设置"), subtitle: L("Appearance, language, permissions, and screenshot storage preferences.", "外观、语言、权限与截图库保存方式。"))
         theme.addItems(withTitles: AppAppearance.allCases.map(\.title))
         theme.target = self
         theme.action = #selector(saveTheme)
@@ -171,6 +182,17 @@ final class GeneralSettingsPane: PageView {
         capturePreview.setAccessibilityLabel(L("Screenshot selection preview", "截图选框预览"))
         let captureReset = NSButton(title: L("Restore Default", "恢复默认"), target: self, action: #selector(resetCaptureAppearance))
         captureReset.bezelStyle = .rounded
+        pinColor.useCompactSwatch()
+        pinColor.supportsAlpha = true
+        pinColor.target = self
+        pinColor.action = #selector(savePinBorder)
+        pinColor.setAccessibilityLabel(L("Pinned image border color", "钉图边框颜色"))
+        pinWidth.onChange = { [weak self] _ in self?.savePinBorder() }
+        let pinReset = NSButton(title: L("Restore Default", "恢复默认"), target: self, action: #selector(resetPinBorder))
+        pinReset.bezelStyle = .rounded
+        let pinBorderRow = NSStackView(views: [pinColor, pinWidth, pinReset])
+        pinBorderRow.spacing = 10
+        loadPinBorder()
         let captureAppearanceRow = NSStackView(views: [captureColor, captureOpacity, captureBorder, captureWidth, capturePreview, captureReset])
         captureAppearanceRow.spacing = 10
         language.addItems(withTitles: ["English", "简体中文"])
@@ -179,12 +201,8 @@ final class GeneralSettingsPane: PageView {
         language.action = #selector(saveLanguage)
         autoSave.target = self
         autoSave.action = #selector(save)
-        reuseEditorStyle.target = self
-        reuseEditorStyle.action = #selector(save)
-        let reuseStyleHint = NSTextField(wrappingLabelWithString: L("Apply background, padding, border, corners, and shadow when copying, saving, or pinning. Annotations are not reused.", "复制、保存或钉图时自动应用背景、留白、描边、圆角和阴影，不沿用标注。"))
-        reuseStyleHint.font = .systemFont(ofSize: 12)
-        reuseStyleHint.textColor = .secondaryLabelColor
-        reuseStyleHint.preferredMaxLayoutWidth = 500
+        copyStyled.target = self
+        copyStyled.action = #selector(save)
         retention.addItems(withTitles: retentionOptions.map(\.title))
         retention.target = self
         retention.action = #selector(save)
@@ -234,16 +252,17 @@ final class GeneralSettingsPane: PageView {
             [Self.label(L("Language", "语言")), language],
             [Self.label(L("Theme", "主题")), theme],
             [Self.label(L("Screenshot selection", "截图选框")), captureAppearanceRow],
-            [Self.label(L("Screenshot shortcut", "截图快捷键")), ShortcutRecorder(action: .capture)],
-            [Self.label(L("Pin shortcut", "钉图快捷键")), ShortcutRecorder(action: .pin)],
-            [NSGridCell.emptyContentView, Self.label(L("Pins the screenshot you just finished; otherwise pins the image on the clipboard.", "钉住刚刚完成的截图；没有新截图时钉住剪贴板里的图片。"), secondary: true)],
+            [Self.label(L("Pinned image border", "钉图边框")), pinBorderRow],
+            [NSGridCell.emptyContentView, Self.label(L("Choose no color or 0 px for no border.", "选择「无颜色」或粗细设为 0，即可去掉边框。"), secondary: true)],
             [Self.label(L("Screenshot access", "截图权限")), screenCaptureRow],
             [NSGridCell.emptyContentView, screenCaptureHint],
             [Self.label(L("Component snapping", "组件自动吸附")), snappingRow],
             [NSGridCell.emptyContentView, Self.label(L("Accessibility access locates Dock icons and controls.", "需要辅助功能权限，用于定位 Dock 图标及控件。"), secondary: true)],
+            [NSGridCell.emptyContentView, copyStyled],
+            [NSGridCell.emptyContentView, Self.wrappingHint(L(
+                "Off: ⌘V pastes the plain screenshot and \(HotKeyCenter.shared.hotKey(for: .pasteStyled).symbol) the framed one. On: ⌘V pastes it framed (background, padding, corners) and \(HotKeyCenter.shared.hotKey(for: .pasteStyled).symbol) the plain one.",
+                "关闭时 ⌘V 粘贴原图、\(HotKeyCenter.shared.hotKey(for: .pasteStyled).symbol) 粘贴带样式的图；开启后 ⌘V 直接粘贴带背景、留白、圆角的图，\(HotKeyCenter.shared.hotKey(for: .pasteStyled).symbol) 改为粘贴原图。"))],
             [NSGridCell.emptyContentView, autoSave],
-            [NSGridCell.emptyContentView, reuseEditorStyle],
-            [NSGridCell.emptyContentView, reuseStyleHint],
             [Self.label(L("Keep screenshots", "保留时间")), retention],
             [NSGridCell.emptyContentView, Self.label(L("Screenshots older than this period are deleted automatically.", "超过保留时间的截图会自动删除。"), secondary: true)],
             [Self.label(L("Library", "截图库")), NSStackView(views: [openFolder, clear])],
@@ -262,7 +281,7 @@ final class GeneralSettingsPane: PageView {
         theme.selectItem(at: AppAppearance.allCases.firstIndex(of: AppAppearance.saved()) ?? 0)
         loadCaptureAppearance()
         autoSave.state = AppSettings.autoSave ? .on : .off
-        reuseEditorStyle.state = AppSettings.reuseEditorStyle ? .on : .off
+        copyStyled.state = AppSettings.copyStyled ? .on : .off
         retention.selectItem(at: retentionOptions.firstIndex { $0.days == AppSettings.retentionDays } ?? 1)
         refreshLibraryLocation()
     }
@@ -340,6 +359,24 @@ final class GeneralSettingsPane: PageView {
         capturePreview.appearanceSettings = appearance
     }
 
+    private func loadPinBorder() {
+        let border = PinBorder.load()
+        pinColor.color = border.nsColor
+        pinWidth.setValue(border.width)
+    }
+
+    @objc private func savePinBorder() {
+        var border = PinBorder.load()
+        border.setColor(pinColor.color)
+        border.width = pinWidth.value
+        border.save()
+    }
+
+    @objc private func resetPinBorder() {
+        PinBorder().save()
+        loadPinBorder()
+    }
+
     @objc private func resetCaptureAppearance() {
         CaptureAppearance().save()
         loadCaptureAppearance()
@@ -352,7 +389,7 @@ final class GeneralSettingsPane: PageView {
 
     @objc private func save() {
         AppSettings.autoSave = autoSave.state == .on
-        AppSettings.reuseEditorStyle = reuseEditorStyle.state == .on
+        AppSettings.copyStyled = copyStyled.state == .on
         AppSettings.retentionDays = retentionOptions[retention.indexOfSelectedItem].days
         HistoryStore.shared.purgeExpired()
         NotificationCenter.default.post(name: HistoryStore.didChange, object: nil)
@@ -460,7 +497,8 @@ final class KeycapRow: NSStackView {
             cap.addSubview(label)
             NSLayoutConstraint.activate([
                 cap.heightAnchor.constraint(equalToConstant: size + 14),
-                cap.widthAnchor.constraint(greaterThanOrEqualToConstant: size + 14),
+                // Wide enough for any single letter, so every one-key cap has the same width.
+                cap.widthAnchor.constraint(greaterThanOrEqualToConstant: size + 20),
                 label.centerYAnchor.constraint(equalTo: cap.centerYAnchor),
                 label.leadingAnchor.constraint(equalTo: cap.leadingAnchor, constant: 7),
                 label.trailingAnchor.constraint(equalTo: cap.trailingAnchor, constant: -7)
@@ -472,10 +510,58 @@ final class KeycapRow: NSStackView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }
 
-/// Click "Change…", then press a new shortcut; Esc cancels. The current shortcut is paused while recording.
+/// What a `ShortcutRecorder` edits: how to read, change, and reset one shortcut.
+@MainActor
+struct ShortcutBinding {
+    var keys: () -> [String]
+    var isDefault: () -> Bool
+    var hint: String
+    /// Applies a recorded key press; returns an error message when it is not accepted.
+    var change: (HotKey) -> String?
+    var restoreDefault: () -> Void
+    var didChange: Notification.Name
+
+    static func global(_ action: HotKeyAction) -> Self {
+        Self(keys: { HotKeyCenter.shared.hotKey(for: action).keys },
+             isDefault: { HotKeyCenter.shared.hotKey(for: action) == action.defaultHotKey },
+             hint: L("Include ⌃, ⌥, or ⌘ (function keys work alone). Press Esc to cancel.", "需包含 ⌃、⌥ 或 ⌘（F 功能键可单独使用），按 Esc 取消。"),
+             change: { hotKey in
+                 guard hotKey.isValidGlobalShortcut else { return L("\(hotKey.symbol) needs ⌃, ⌥, or ⌘.", "\(hotKey.symbol) 需要包含 ⌃、⌥ 或 ⌘。") }
+                 switch HotKeyCenter.shared.change(action, to: hotKey) {
+                 case .changed: return nil
+                 case .conflict: return L("\(hotKey.symbol) is already used by another Snapok shortcut.", "\(hotKey.symbol) 已被 Snapok 的另一个快捷键使用，请换一个。")
+                 case .refused: return L("\(hotKey.symbol) is used by macOS or another app. Try a different shortcut.", "\(hotKey.symbol) 已被系统或其他应用占用，请换一个。")
+                 }
+             },
+             restoreDefault: { _ = HotKeyCenter.shared.change(action, to: action.defaultHotKey) },
+             didChange: HotKeyCenter.didChange)
+    }
+
+    static func tool(_ slot: String) -> Self {
+        let isTool = ToolShortcuts.toolSlots.contains(slot)
+        return Self(keys: { ToolShortcuts.hotKey(for: slot).keys },
+             isDefault: { ToolShortcuts.hotKey(for: slot) == ToolShortcuts.defaultHotKey(for: slot) },
+             hint: isTool ? L("Press a single key without modifiers. Press Esc to cancel.", "按下一个单独的按键（不加修饰键），按 Esc 取消。")
+                          : L("Press a key, with or without modifiers. Press Esc to cancel.", "按下按键，可以带修饰键，按 Esc 取消。"),
+             change: { hotKey in
+                 switch ToolShortcuts.change(slot, to: hotKey) {
+                 case .changed: return nil
+                 case .needsPlainKey: return L("\(hotKey.symbol): use a single key without ⌃, ⌥, ⇧, or ⌘.", "\(hotKey.symbol)：请使用单个按键，不要加 ⌃、⌥、⇧ 或 ⌘。")
+                 case .reserved: return L("\(hotKey.symbol) is already used in the editor.", "\(hotKey.symbol) 已被编辑器的其他操作使用，请换一个。")
+                 case .conflict(let other):
+                     let name = ToolShortcuts.title(for: other)
+                     return L("\(hotKey.symbol) is already used by \(name).", "\(hotKey.symbol) 已被「\(name)」使用，请换一个。")
+                 }
+             },
+             restoreDefault: { _ = ToolShortcuts.change(slot, to: ToolShortcuts.defaultHotKey(for: slot)) },
+             didChange: ToolShortcuts.didChange)
+    }
+}
+
+/// Click "Change…", then press a new shortcut; Esc cancels. Global shortcuts are paused while recording.
 @MainActor
 final class ShortcutRecorder: NSStackView {
-    private let action: HotKeyAction
+    private let binding: ShortcutBinding
     private let keys: KeycapRow
     private let prompt = NSTextField(labelWithString: L("Press a new shortcut…", "请按下新的快捷键…"))
     private let change = NSButton(title: L("Change…", "修改…"), target: nil, action: nil)
@@ -483,10 +569,13 @@ final class ShortcutRecorder: NSStackView {
     private let status = NSTextField(wrappingLabelWithString: "")
     private var monitor: Any?
     private var resignObserver: NSObjectProtocol?
+    private var changeObserver: NSObjectProtocol?
 
-    init(action: HotKeyAction = .capture) {
-        self.action = action
-        keys = KeycapRow.shortcut(for: action)
+    convenience init(action: HotKeyAction = .capture) { self.init(binding: .global(action)) }
+
+    init(binding: ShortcutBinding) {
+        self.binding = binding
+        keys = KeycapRow(keys: binding.keys())
         super.init(frame: .zero)
         orientation = .vertical
         alignment = .leading
@@ -507,7 +596,10 @@ final class ShortcutRecorder: NSStackView {
         row.spacing = 10
         addArrangedSubview(row)
         addArrangedSubview(status)
-        updateReset()
+        changeObserver = NotificationCenter.default.addObserver(forName: binding.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
+        }
+        refresh()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -526,7 +618,7 @@ final class ShortcutRecorder: NSStackView {
         keys.isHidden = true
         prompt.isHidden = false
         change.title = L("Cancel", "取消")
-        showStatus(L("Include ⌃, ⌥, or ⌘ (function keys work alone). Press Esc to cancel.", "需包含 ⌃、⌥ 或 ⌘（F 功能键可单独使用），按 Esc 取消。"), error: false)
+        showStatus(binding.hint, error: false)
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.record(event)
             return nil
@@ -547,7 +639,7 @@ final class ShortcutRecorder: NSStackView {
         prompt.isHidden = true
         change.title = L("Change…", "修改…")
         if status.textColor != .systemRed { status.isHidden = true }
-        updateReset()
+        refresh()
     }
 
     private func record(_ event: NSEvent) {
@@ -558,29 +650,20 @@ final class ShortcutRecorder: NSStackView {
             return
         }
         guard let hotKey = HotKey(event: event) else { return }
-        guard hotKey.isValidGlobalShortcut else {
-            showStatus(L("\(hotKey.symbol) needs ⌃, ⌥, or ⌘.", "\(hotKey.symbol) 需要包含 ⌃、⌥ 或 ⌘。"), error: true)
+        if let error = binding.change(hotKey) {
+            showStatus(error, error: true)
             return
         }
-        apply(hotKey)
+        status.isHidden = true
+        status.textColor = .secondaryLabelColor
+        stopRecording()
     }
 
     @objc private func restoreDefault() {
         stopRecording()
-        apply(action.defaultHotKey)
-    }
-
-    private func apply(_ hotKey: HotKey) {
-        switch HotKeyCenter.shared.change(action, to: hotKey) {
-        case .changed:
-            status.isHidden = true
-            status.textColor = .secondaryLabelColor
-        case .conflict:
-            showStatus(L("\(hotKey.symbol) is already used by another Snapok shortcut.", "\(hotKey.symbol) 已被 Snapok 的另一个快捷键使用，请换一个。"), error: true)
-        case .refused:
-            showStatus(L("\(hotKey.symbol) is used by macOS or another app. Try a different shortcut.", "\(hotKey.symbol) 已被系统或其他应用占用，请换一个。"), error: true)
-        }
-        stopRecording()
+        binding.restoreDefault()
+        status.isHidden = true
+        status.textColor = .secondaryLabelColor
     }
 
     private func showStatus(_ text: String, error: Bool) {
@@ -589,8 +672,9 @@ final class ShortcutRecorder: NSStackView {
         status.isHidden = false
     }
 
-    private func updateReset() {
-        reset.isHidden = HotKeyCenter.shared.hotKey(for: action) == action.defaultHotKey
+    private func refresh() {
+        keys.setKeys(binding.keys())
+        reset.isHidden = binding.isDefault()
     }
 }
 
@@ -722,4 +806,68 @@ final class IconTile: NSView {
 
 final class FlippedView: NSView {
     override var isFlipped: Bool { true }
+}
+
+/// Global shortcuts and the editing tools' single-key shortcuts.
+@MainActor
+final class ShortcutsPane: SectionedPageView {
+    private let restoreTools = NSButton(title: L("Restore All Defaults", "全部恢复默认"), target: nil, action: nil)
+
+    init() {
+        super.init(title: L("Shortcuts", "快捷键"))
+        addSection(L("Global", "全局快捷键"), rows: [
+            Self.row(L("Take screenshot", "截图"), ShortcutRecorder(binding: .global(.capture))),
+            Self.row(L("Pin", "钉图"), ShortcutRecorder(binding: .global(.pin)),
+                     subtitle: L("Pins the screenshot you just finished; otherwise the image on the clipboard.", "钉住刚完成的截图；没有新截图时钉住剪贴板里的图片。")),
+            Self.row(L("Paste with style", "粘贴带样式的截图"), ShortcutRecorder(binding: .global(.pasteStyled)),
+                     subtitle: L("Within 5 minutes of copying a screenshot, pastes it framed in your last editing style (or the plain one, if General copies screenshots framed). The rest of the time the key works as usual in other apps.",
+                                 "复制截图后 5 分钟内可用：套上上次编辑的样式（背景、留白、圆角等）后粘贴；如果在通用设置里开启了「复制截图时套用样式」，则粘贴原图。其余时间不占用这个按键。"))
+        ])
+        add(Self.footnote(L("Global shortcuts work in any app, even when Snapok is in the background.", "全局快捷键在任何应用中都可以使用，Snapok 在后台时也能触发。")), spacingBefore: 8)
+        restoreTools.bezelStyle = .inline
+        restoreTools.target = self
+        restoreTools.action = #selector(restoreToolDefaults)
+        addSection(L("Toolbar Tools", "工具栏 · 工具"), accessory: restoreTools,
+                   rows: ToolShortcuts.toolSlots.map { Self.row(ToolShortcuts.title(for: $0), ShortcutRecorder(binding: .tool($0))) })
+        add(Self.footnote(L("While capturing or editing, press the key to switch tools. 1–3 and [ ] change the stroke size.",
+                            "截图或编辑图片时，直接按下按键即可切换工具；1–3 和 [ ] 用于调整粗细。")), spacingBefore: 8)
+        addSection(L("Toolbar Actions", "工具栏 · 操作"), rows: ToolShortcuts.Action.allCases.map { action in
+            let note: String? = switch action {
+            case .cancel: L("Esc always works too.", "Esc 也始终可用。")
+            case .done: L("Enter always works too; ⌘C copies.", "Enter 也始终可用；⌘C 复制。")
+            case .scroll, .editImage: L("While capturing", "截图时可用")
+            default: nil
+            }
+            return Self.row(action.title, ShortcutRecorder(binding: .tool(action.rawValue)), subtitle: note)
+        })
+        NotificationCenter.default.addObserver(self, selector: #selector(syncRestoreTools), name: ToolShortcuts.didChange, object: nil)
+        syncRestoreTools()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private static func row(_ title: String, _ recorder: NSView, subtitle: String? = nil) -> NSView {
+        let name = NSTextField(labelWithString: title)
+        name.font = .systemFont(ofSize: 13, weight: .medium)
+        let labels = NSStackView(views: [name] + (subtitle.map { [label($0, secondary: true)] } ?? []))
+        labels.orientation = .vertical
+        labels.alignment = .leading
+        labels.spacing = 3
+        labels.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        (labels.arrangedSubviews.last as? NSTextField)?.lineBreakMode = .byWordWrapping
+        // The keycaps are taller than a one-line title, so the row sizes to them and centers both sides;
+        // otherwise rows without a subtitle let the keycaps run over the separator.
+        recorder.setContentCompressionResistancePriority(.required, for: .vertical)
+        recorder.setContentHuggingPriority(.required, for: .vertical)
+        let row = NSStackView(views: [labels, NSView(), recorder])
+        row.alignment = .centerY
+        row.spacing = 16
+        row.edgeInsets = NSEdgeInsets(top: 12, left: 18, bottom: 12, right: 18)
+        row.heightAnchor.constraint(greaterThanOrEqualToConstant: 52).isActive = true
+        return row
+    }
+
+    @objc private func restoreToolDefaults() { ToolShortcuts.restoreDefaults() }
+
+    @objc private func syncRestoreTools() { restoreTools.isHidden = ToolShortcuts.isDefault }
 }

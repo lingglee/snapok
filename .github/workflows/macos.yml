@@ -162,6 +162,19 @@ jobs:
           fi
           ./scripts/publish-cdn.sh dist/archives/*.dmg dist/archives/*.zip
 
+      # Release tags also move the Homebrew cask (thinkany-ai/homebrew-tap) to the version just published.
+      - name: Update Homebrew cask
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && steps.signing.outputs.ready == 'true'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$HOMEBREW_TAP_TOKEN" ]]; then
+            echo '::warning::HOMEBREW_TAP_TOKEN is not configured; the Homebrew cask was not updated.'
+            exit 0
+          fi
+          ./scripts/update-homebrew-cask.sh
+
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: Snapok-macos-${{ github.sha }}
