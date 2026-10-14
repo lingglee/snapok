@@ -10,9 +10,7 @@ struct CaptureStyle {
         self.preferences = preferences
         switch preferences.backgroundType {
         case 1:
-            if let screen = screen ?? NSScreen.main,
-               let url = NSWorkspace.shared.desktopImageURL(for: screen),
-               let image = NSImage(contentsOf: url) {
+            if let image = DesktopWallpaper.cached(for: screen) {
                 background = .image(image)
             } else { background = .gradient(preferences.gradient) }
         case 2: background = .color(Self.color(preferences.backgroundColor))

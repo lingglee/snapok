@@ -6,12 +6,22 @@ struct LocalizationTests {
         let suite = "Snapok.LocalizationTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        precondition(AppLanguage.saved(in: defaults) == .english)
+        // A fresh installation follows the system: the first of English or Chinese in macOS's order, else English.
+        precondition(LanguagePreference.saved(in: defaults) == .system)
+        precondition(AppLanguage.saved(in: defaults, systemLanguages: ["en-US", "zh-Hans-CN"]) == .english)
+        precondition(AppLanguage.saved(in: defaults, systemLanguages: ["zh-Hans-CN", "en-US"]) == .simplifiedChinese)
+        precondition(AppLanguage.saved(in: defaults, systemLanguages: ["ja-JP", "zh-Hant-TW"]) == .simplifiedChinese)
+        precondition(AppLanguage.saved(in: defaults, systemLanguages: ["fr-FR"]) == .english)
         defaults.set("invalid-language", forKey: AppLanguage.preferenceKey)
-        precondition(AppLanguage.saved(in: defaults) == .english)
+        precondition(LanguagePreference.saved(in: defaults) == .system, "Unknown values follow the system")
+        // An explicit choice wins over the system.
+        defaults.set("en", forKey: AppLanguage.preferenceKey)
+        precondition(AppLanguage.saved(in: defaults, systemLanguages: ["zh-Hans-CN"]) == .english)
+        defaults.set("system", forKey: AppLanguage.preferenceKey)
+        precondition(AppLanguage.saved(in: defaults, systemLanguages: ["zh-Hans-CN"]) == .simplifiedChinese)
         for language in AppLanguage.allCases {
             language.save(in: defaults)
-            precondition(AppLanguage.saved(in: UserDefaults(suiteName: suite)!) == language)
+            precondition(AppLanguage.saved(in: UserDefaults(suiteName: suite)!, systemLanguages: ["fr"]) == language)
             precondition(defaults.stringArray(forKey: "AppleLanguages") == [language.rawValue])
         }
         // Use a process-local override, never touching the real app's preferences.

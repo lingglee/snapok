@@ -60,6 +60,9 @@ final class ImageAgentStore {
 
     func chat(_ id: String) -> AgentChat? { chats.first { $0.id == id } }
 
+    /// The PNG behind `image(_:in:)`, for Quick Look.
+    func imageURL(_ name: String, in chatID: String) -> URL { folder(chatID).appendingPathComponent(name) }
+
     func image(_ name: String, in chatID: String) -> NSImage? {
         let key = "\(chatID)/\(name)" as NSString
         if let cached = images.object(forKey: key) { return cached }

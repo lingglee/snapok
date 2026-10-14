@@ -54,7 +54,9 @@ actor FocusDetector {
     static let shared = FocusDetector()
 
     func regions(in target: WindowTarget, at point: CGPoint, primaryHeight: CGFloat) -> [CGRect] {
-        guard !Task.isCancelled, AXIsProcessTrusted() else { return [] }
+        // Never query Snapok itself: AppKit answers in-process accessibility requests on the calling thread, so its
+        // views would hit-test off the main thread and trap. Snapok's own windows still snap as whole windows.
+        guard !Task.isCancelled, AXIsProcessTrusted(), target.pid != ProcessInfo.processInfo.processIdentifier else { return [] }
         let app = AXUIElementCreateApplication(target.pid)
         AXUIElementSetMessagingTimeout(app, 0.08)
         var hit: AXUIElement?

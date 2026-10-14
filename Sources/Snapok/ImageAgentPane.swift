@@ -1,4 +1,5 @@
 import AppKit
+import Quartz
 
 /// What a new Snapok Agent chat starts with when opened from elsewhere (the image editor).
 enum AgentRequest {
@@ -27,6 +28,9 @@ final class ImageAgentPane: NSView, NSSplitViewDelegate {
     private var chatID: String?
     private var previewName: String?
     private var previewOpen = false
+    /// The chat's images while Quick Look shows them; the pane is their data source.
+    private var quickLookURLs: [URL] = []
+    private var quickLookIndex = 0
     private var imageCounts: [String: Int] = [:]
 
     private let history = AgentHistoryController()
@@ -171,6 +175,12 @@ final class ImageAgentPane: NSView, NSSplitViewDelegate {
         noticeLabel.textColor = .secondaryLabelColor
         noticeLabel.maximumNumberOfLines = 2
         noticeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The buttons keep their own width; any spare width goes to the label (it re-wraps), never to a stretched button.
+        noticeLabel.setContentHuggingPriority(.init(1), for: .horizontal)
+        for button in [noticeButton, ownModelButton] {
+            button.setContentHuggingPriority(.required, for: .horizontal)
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
         noticeButton.bezelStyle = .rounded
         noticeButton.target = self
         noticeButton.action = #selector(noticeAction)
@@ -203,6 +213,8 @@ final class ImageAgentPane: NSView, NSSplitViewDelegate {
         hug.isActive = true
 
         transcript.onOpenImage = { [weak self] name in self?.openPreview(name) }
+        transcript.onQuickLook = { [weak self] name in self?.quickLook(name) }
+        transcript.imageMenu = { [weak self] name in self?.imageMenu(for: name) }
         transcript.onRetry = { [weak self] in
             guard let self, let chatID else { return }
             store.retry(chatID)
@@ -235,6 +247,8 @@ final class ImageAgentPane: NSView, NSSplitViewDelegate {
             self?.reload()
         }
         preview.onAction = { [weak self] action in self?.perform(action) }
+        preview.onQuickLook = { [weak self] name in self?.quickLook(name) }
+        preview.imageMenu = { [weak self] name in self?.imageMenu(for: name) }
         preview.translatesAutoresizingMaskIntoConstraints = false
         previewCard.addSubview(preview)
 
@@ -461,8 +475,9 @@ final class ImageAgentPane: NSView, NSSplitViewDelegate {
         }
     }
 
-    private func perform(_ action: AgentPreviewPane.Action) {
-        guard let chatID, let previewName, let image = store.image(previewName, in: chatID) else { return }
+    /// Runs `action` on the previewed image, or on `name` when it comes from an image's context menu.
+    private func perform(_ action: AgentPreviewPane.Action, name: String? = nil) {
+        guard let chatID, let name = name ?? previewName, let image = store.image(name, in: chatID) else { return }
         switch action {
         case .edit:
             onEditImage?(image)
@@ -485,6 +500,73 @@ final class ImageAgentPane: NSView, NSSplitViewDelegate {
             case .cancelled: break
             case .failed: feedback.showError(L("Could not save. Choose another location and try again.", "保存失败，请选择其他位置后重试。"), in: window)
             }
+        }
+    }
+
+    /// The right-click menu of a chat image.
+    private func imageMenu(for name: String) -> NSMenu {
+        let menu = NSMenu()
+        let items: [(String, Selector)?] = [
+            (L("Quick Look", "快速查看"), #selector(quickLookItem(_:))),
+            nil,
+            (L("Copy Image", "复制图片"), #selector(copyItem(_:))),
+            (L("Save PNG…", "保存 PNG…"), #selector(saveItem(_:))),
+            nil,
+            (L("Open in Editor", "在编辑器中打开"), #selector(editItem(_:))),
+            (L("Save to Library", "保存到截图库"), #selector(libraryItem(_:)))
+        ]
+        for entry in items {
+            guard let (title, action) = entry else { menu.addItem(.separator()); continue }
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = name
+        }
+        return menu
+    }
+
+    @objc private func quickLookItem(_ sender: NSMenuItem) { (sender.representedObject as? String).map(quickLook) }
+    @objc private func copyItem(_ sender: NSMenuItem) { perform(.copy, name: sender.representedObject as? String) }
+    @objc private func saveItem(_ sender: NSMenuItem) { perform(.save, name: sender.representedObject as? String) }
+    @objc private func editItem(_ sender: NSMenuItem) { perform(.edit, name: sender.representedObject as? String) }
+    @objc private func libraryItem(_ sender: NSMenuItem) { perform(.library, name: sender.representedObject as? String) }
+
+    /// Opens `name` in Quick Look, with the chat's other images a swipe or arrow key away.
+    private func quickLook(_ name: String) {
+        guard let chatID, let chat = store.chat(chatID) else { return }
+        let names = store.allImages(in: chat)
+        quickLookURLs = names.map { store.imageURL($0, in: chatID) }
+        quickLookIndex = names.firstIndex(of: name) ?? 0
+        guard !quickLookURLs.isEmpty, let panel = QLPreviewPanel.shared() else { return }
+        // Quick Look asks the responder chain for a controller, so take focus for as long as it is open.
+        acceptsQuickLookFocus = true
+        window?.makeFirstResponder(self)
+        if panel.isVisible {
+            panel.reloadData()
+            panel.currentPreviewItemIndex = quickLookIndex
+        } else {
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private var acceptsQuickLookFocus = false
+    override var acceptsFirstResponder: Bool { acceptsQuickLookFocus }
+
+    // Quick Look calls these on the main thread, though they aren't annotated that way.
+    nonisolated override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool {
+        MainActor.assumeIsolated { !quickLookURLs.isEmpty }
+    }
+
+    nonisolated override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        MainActor.assumeIsolated {
+            panel.dataSource = self
+            panel.currentPreviewItemIndex = quickLookIndex
+        }
+    }
+
+    nonisolated override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        MainActor.assumeIsolated {
+            panel.dataSource = nil
+            acceptsQuickLookFocus = false
         }
     }
 
@@ -562,6 +644,14 @@ extension ImageAgentPane {
 }
 
 /// Chat and preview side by side, with a gap that doubles as the drag handle.
+extension ImageAgentPane: @preconcurrency QLPreviewPanelDataSource {
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { quickLookURLs.count }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
+        quickLookURLs[index] as NSURL
+    }
+}
+
 final class AgentSplitView: NSSplitView {
     override var dividerThickness: CGFloat {
         arrangedSubviews.contains(where: \.isHidden) ? 0 : 14
@@ -840,9 +930,12 @@ final class AgentPreviewPane: NSView {
     var onSelect: ((String) -> Void)?
     var onClose: (() -> Void)?
     var onAction: ((Action) -> Void)?
+    var onQuickLook: ((String) -> Void)?
+    var imageMenu: ((String) -> NSMenu?)?
 
+    private var selected: String?
     private let counter = NSTextField(labelWithString: "")
-    private let imageView = NSImageView()
+    private let imageView = AgentImageView()
     private let filmstrip = NSStackView()
     private let filmstripScroll = NSScrollView()
 
@@ -871,6 +964,11 @@ final class AgentPreviewPane: NSView {
         header.heightAnchor.constraint(equalToConstant: 32).isActive = true
 
         imageView.imageScaling = .scaleProportionallyDown
+        imageView.onDoubleClick = { [weak self] in
+            guard let self, let selected else { return }
+            onQuickLook?(selected)
+        }
+        imageView.contextMenu = { [weak self] in self?.selected.flatMap { self?.imageMenu?($0) } }
         // Lowest of all, so a large image never widens the pane.
         imageView.setContentCompressionResistancePriority(.init(100), for: .vertical)
         imageView.setContentCompressionResistancePriority(.init(100), for: .horizontal)
@@ -915,6 +1013,7 @@ final class AgentPreviewPane: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func show(chatID: String, names: [String], selected: String) {
+        self.selected = selected
         let index = names.firstIndex(of: selected) ?? 0
         counter.stringValue = L("Image \(index + 1) of \(names.count)", "第 \(index + 1) 张，共 \(names.count) 张")
         imageView.image = ImageAgentStore.shared.image(selected, in: chatID)
@@ -924,6 +1023,8 @@ final class AgentPreviewPane: NSView {
             let thumb = AgentThumbnail(image: image, maxSize: CGSize(width: 64, height: 64), cornerRadius: 8) { [weak self] in
                 self?.onSelect?(name)
             }
+            thumb.onDoubleClick = { [weak self] in self?.onQuickLook?(name) }
+            thumb.contextMenu = { [weak self] in self?.imageMenu?(name) }
             if name == selected {
                 thumb.layer?.borderWidth = 2
                 thumb.layer?.borderColor = Brand.accent.cgColor

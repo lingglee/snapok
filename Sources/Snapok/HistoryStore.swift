@@ -5,6 +5,18 @@ import Security
 enum AppSettings {
     private static var defaults: UserDefaults { .standard }
 
+    /// Posted when `showsCaptureCard` changes, so the sidebar shows or hides the card at once.
+    static let captureCardDidChange = Notification.Name("AppSettings.captureCardDidChange")
+
+    /// The sidebar's "Capture anytime" card; closing it (×) or Settings → General turns it off.
+    static var showsCaptureCard: Bool {
+        get { defaults.object(forKey: "sidebar.captureCard") as? Bool ?? true }
+        set {
+            defaults.set(newValue, forKey: "sidebar.captureCard")
+            NotificationCenter.default.post(name: captureCardDidChange, object: nil)
+        }
+    }
+
     /// Copy finished screenshots framed in the last editing style; the paste-styled shortcut then pastes the plain one.
     static var copyStyled: Bool {
         get { defaults.object(forKey: "capture.copyStyled") as? Bool ?? false }

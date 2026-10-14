@@ -138,6 +138,7 @@ final class CardView: NSView {
 final class GeneralSettingsPane: PageView {
     private let copyStyled = NSButton(checkboxWithTitle: L("Copy screenshots in your last editing style", "复制截图时套用上次编辑的样式"), target: nil, action: nil)
     private let autoSave = NSButton(checkboxWithTitle: L("Automatically save screenshots to the library", "截图后自动保存到截图库"), target: nil, action: nil)
+    private let captureCard = NSButton(checkboxWithTitle: L("Show the “Capture anytime” card in the sidebar", "在侧边栏显示「随时截图」卡片"), target: nil, action: nil)
     private let retention = NSPopUpButton()
     private let language = NSPopUpButton()
     private let theme = NSPopUpButton()
@@ -195,12 +196,19 @@ final class GeneralSettingsPane: PageView {
         loadPinBorder()
         let captureAppearanceRow = NSStackView(views: [captureColor, captureOpacity, captureBorder, captureWidth, capturePreview, captureReset])
         captureAppearanceRow.spacing = 10
-        language.addItems(withTitles: ["English", "简体中文"])
-        language.selectItem(at: AppLanguage.allCases.firstIndex(of: AppLanguage.saved()) ?? 0)
+        // "Follow System" names the language it resolves to, so the choice is clear before picking it.
+        let system = LanguagePreference.system.resolved() == .simplifiedChinese ? "简体中文" : "English"
+        language.addItems(withTitles: [L("System (\(system))", "跟随系统（\(system)）"), "English", "简体中文"])
+        language.selectItem(at: LanguagePreference.allCases.firstIndex(of: LanguagePreference.saved()) ?? 0)
         language.target = self
         language.action = #selector(saveLanguage)
         autoSave.target = self
         autoSave.action = #selector(save)
+        captureCard.target = self
+        captureCard.action = #selector(save)
+        NotificationCenter.default.addObserver(forName: AppSettings.captureCardDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.captureCard.state = AppSettings.showsCaptureCard ? .on : .off }
+        }
         copyStyled.target = self
         copyStyled.action = #selector(save)
         retention.addItems(withTitles: retentionOptions.map(\.title))
@@ -251,6 +259,7 @@ final class GeneralSettingsPane: PageView {
         addCard(Self.form([
             [Self.label(L("Language", "语言")), language],
             [Self.label(L("Theme", "主题")), theme],
+            [NSGridCell.emptyContentView, captureCard],
             [Self.label(L("Screenshot selection", "截图选框")), captureAppearanceRow],
             [Self.label(L("Pinned image border", "钉图边框")), pinBorderRow],
             [NSGridCell.emptyContentView, Self.label(L("Choose no color or 0 px for no border.", "选择「无颜色」或粗细设为 0，即可去掉边框。"), secondary: true)],
@@ -281,6 +290,7 @@ final class GeneralSettingsPane: PageView {
         theme.selectItem(at: AppAppearance.allCases.firstIndex(of: AppAppearance.saved()) ?? 0)
         loadCaptureAppearance()
         autoSave.state = AppSettings.autoSave ? .on : .off
+        captureCard.state = AppSettings.showsCaptureCard ? .on : .off
         copyStyled.state = AppSettings.copyStyled ? .on : .off
         retention.selectItem(at: retentionOptions.firstIndex { $0.days == AppSettings.retentionDays } ?? 1)
         refreshLibraryLocation()
@@ -383,12 +393,13 @@ final class GeneralSettingsPane: PageView {
     }
 
     @objc private func saveLanguage() {
-        guard AppLanguage.allCases.indices.contains(language.indexOfSelectedItem) else { return }
-        AppLanguage.switchTo(AppLanguage.allCases[language.indexOfSelectedItem])
+        guard LanguagePreference.allCases.indices.contains(language.indexOfSelectedItem) else { return }
+        AppLanguage.switchTo(LanguagePreference.allCases[language.indexOfSelectedItem])
     }
 
     @objc private func save() {
         AppSettings.autoSave = autoSave.state == .on
+        if AppSettings.showsCaptureCard != (captureCard.state == .on) { AppSettings.showsCaptureCard = captureCard.state == .on }
         AppSettings.copyStyled = copyStyled.state == .on
         AppSettings.retentionDays = retentionOptions[retention.indexOfSelectedItem].days
         HistoryStore.shared.purgeExpired()

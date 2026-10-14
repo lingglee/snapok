@@ -200,6 +200,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         imageAgentItem.widthAnchor.constraint(equalTo: nav.widthAnchor).isActive = true
 
         let shortcut = makeShortcutCard()
+        shortcut.isHidden = !AppSettings.showsCaptureCard
+        NotificationCenter.default.addObserver(forName: AppSettings.captureCardDidChange, object: nil, queue: .main) { [weak shortcut] _ in
+            MainActor.assumeIsolated { shortcut?.isHidden = !AppSettings.showsCaptureCard }
+        }
         let version = NSTextField(labelWithString: L("Version ", "版本 ") + ((Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev"))
         version.font = .systemFont(ofSize: 11)
         version.textColor = .tertiaryLabelColor
@@ -280,16 +284,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         stack.setCustomSpacing(14, after: keys)
         stack.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(stack)
+        // Close hides the card for good; Settings → General brings it back.
+        let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: L("Hide", "隐藏"))!,
+                             target: self, action: #selector(hideCaptureCard))
+        close.isBordered = false
+        close.contentTintColor = .tertiaryLabelColor
+        close.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
+        close.toolTip = L("Hide this card (show it again in Settings → General)", "隐藏此卡片（可在「设置 → 通用」里重新显示）")
+        close.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(close)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 16),
             stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
             stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
             stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -16),
             hint.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            button.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            button.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            close.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
+            close.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: close.leadingAnchor, constant: -8)
         ])
         return card
     }
+
+    @objc private func hideCaptureCard() { AppSettings.showsCaptureCard = false }
 }
 
 /// Opaque, theme-aware navigation surface, unaffected by the desktop wallpaper.

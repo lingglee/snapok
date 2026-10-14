@@ -12,9 +12,21 @@ final class WrappingLabel: NSTextField {
     }
 }
 
+/// A chat image that opens Quick Look on double-click and shows `contextMenu` on right-click.
+class AgentImageView: NSImageView {
+    var onDoubleClick: (() -> Void)?
+    var contextMenu: (() -> NSMenu?)?
+
+    override func menu(for event: NSEvent) -> NSMenu? { contextMenu?() }
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2, let onDoubleClick { onDoubleClick() } else if event.clickCount == 1 { singleClick() }
+    }
+    func singleClick() {}
+}
+
 /// An image that fits inside `maxSize`, keeps its aspect ratio, and reports clicks.
 /// It prefers its full fitted size but shrinks when its container is narrower.
-final class AgentThumbnail: NSImageView {
+final class AgentThumbnail: AgentImageView {
     private let onClick: () -> Void
 
     init(image: NSImage, maxSize: CGSize, cornerRadius: CGFloat = 10, onClick: @escaping () -> Void) {
@@ -49,7 +61,7 @@ final class AgentThumbnail: NSImageView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
-    override func mouseDown(with event: NSEvent) { onClick() }
+    override func singleClick() { onClick() }
     override func accessibilityPerformPress() -> Bool { onClick(); return true }
 }
 
@@ -57,6 +69,8 @@ final class AgentThumbnail: NSImageView {
 @MainActor
 final class AgentTranscriptView: NSScrollView {
     var onOpenImage: ((String) -> Void)?
+    var onQuickLook: ((String) -> Void)?
+    var imageMenu: ((String) -> NSMenu?)?
     var onRetry: (() -> Void)?
     /// Runs the cloud generation the last reply left pending.
     var onResume: (() -> Void)?
@@ -96,6 +110,7 @@ final class AgentTranscriptView: NSScrollView {
     /// `liveText` is what the cloud agent has written so far; `started` is when the current phase began.
     func show(_ chat: AgentChat?, running: Bool, generating: Bool = false, liveText: String? = nil,
               steps: [SnapokCloud.AgentStep] = [], started: Date? = nil) {
+        lastShown = (chat, running, generating, liveText, steps, started)
         timer?.invalidate(); timer = nil
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         guard let chat, !chat.messages.isEmpty else {
@@ -113,8 +128,8 @@ final class AgentTranscriptView: NSScrollView {
                 label.isSelectable = true
                 add(label, fill: true)
             }
-            if !steps.isEmpty { add(stepsList(steps), fill: false) }
-            add(workingRow(generating: generating, started: started ?? Date()), fill: false)
+            add(workingRow(generating: generating, started: started ?? Date(), steps: steps), fill: false)
+            if stepsExpanded, !steps.isEmpty { add(stepsList(steps), fill: false) }
         }
         layoutSubtreeIfNeeded()
         scrollToBottom()
@@ -136,8 +151,11 @@ final class AgentTranscriptView: NSScrollView {
 
     private func images(_ names: [String], chatID: String, maxSize: CGSize) -> [NSView] {
         names.compactMap { name in
-            ImageAgentStore.shared.image(name, in: chatID).map { image in
-                AgentThumbnail(image: image, maxSize: maxSize) { [weak self] in self?.onOpenImage?(name) }
+            ImageAgentStore.shared.image(name, in: chatID).map { image -> NSView in
+                let thumb = AgentThumbnail(image: image, maxSize: maxSize) { [weak self] in self?.onOpenImage?(name) }
+                thumb.onDoubleClick = { [weak self] in self?.onQuickLook?(name) }
+                thumb.contextMenu = { [weak self] in self?.imageMenu?(name) }
+                return thumb
             }
         }
     }
@@ -258,18 +276,30 @@ final class AgentTranscriptView: NSScrollView {
         text.replacingOccurrences(of: "<|split|>", with: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// The cloud agent's tool steps: done ones checked, the running one with a spinner.
+    /// The cloud agent's steps, shown when the progress line is expanded. Runs of the same tool are one line
+    /// ("Running a script ×9"); done ones are checked, a running one spins.
     private func stepsList(_ steps: [SnapokCloud.AgentStep]) -> NSView {
+        var groups: [(title: String, count: Int, done: Bool)] = []
+        for step in steps {
+            let title = Self.stepTitle(step.name)
+            if let last = groups.last, last.title == title {
+                groups[groups.count - 1].count += 1
+                groups[groups.count - 1].done = last.done && step.done
+            } else {
+                groups.append((title, 1, step.done))
+            }
+        }
         let list = NSStackView()
         list.orientation = .vertical
         list.alignment = .leading
         list.spacing = 6
-        for step in steps {
+        list.edgeInsets = NSEdgeInsets(top: 0, left: 24, bottom: 0, right: 0)
+        for group in groups {
             let indicator: NSView
-            if step.done {
+            if group.done {
                 let check = NSImageView(image: NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)!)
                 check.contentTintColor = .systemGreen
-                check.symbolConfiguration = .init(pointSize: 12, weight: .regular)
+                check.symbolConfiguration = .init(pointSize: 11, weight: .regular)
                 indicator = check
             } else {
                 let spinner = NSProgressIndicator()
@@ -279,9 +309,10 @@ final class AgentTranscriptView: NSScrollView {
                 indicator = spinner
             }
             indicator.widthAnchor.constraint(equalToConstant: 14).isActive = true
-            let label = NSTextField(labelWithString: Self.stepTitle(step.name) + (step.done ? "" : "…"))
+            let count = group.count > 1 ? " ×\(group.count)" : ""
+            let label = NSTextField(labelWithString: group.title + count)
             label.font = .systemFont(ofSize: 12)
-            label.textColor = step.done ? .tertiaryLabelColor : .secondaryLabelColor
+            label.textColor = group.done ? .tertiaryLabelColor : .secondaryLabelColor
             let row = NSStackView(views: [indicator, label])
             row.spacing = 6
             list.addArrangedSubview(row)
@@ -306,7 +337,9 @@ final class AgentTranscriptView: NSScrollView {
         }
     }
 
-    private func workingRow(generating: Bool, started: Date) -> NSView {
+    /// The progress line. With agent steps it also names the current one ("Running a script · step 13") and gets a
+    /// disclosure arrow that lists them all; most people never need to open it.
+    private func workingRow(generating: Bool, started: Date, steps: [SnapokCloud.AgentStep]) -> NSView {
         let spinner = NSProgressIndicator()
         spinner.style = .spinning
         spinner.controlSize = .small
@@ -314,13 +347,39 @@ final class AgentTranscriptView: NSScrollView {
         let label = NSTextField(labelWithString: "")
         label.font = .systemFont(ofSize: 13)
         label.textColor = .secondaryLabelColor
-        label.stringValue = Self.workingText(since: started, generating: generating)
+        let current = (steps.last(where: { !$0.done }) ?? steps.last).map {
+            L("\(Self.stepTitle($0.name)) · step \(steps.count)", "\(Self.stepTitle($0.name))（第 \(steps.count) 步）")
+        }
+        let text: @MainActor @Sendable () -> String = { [current] in
+            [Self.workingText(since: started, generating: generating), current].compactMap { $0 }.joined(separator: " · ")
+        }
+        label.stringValue = text()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak label] _ in
-            MainActor.assumeIsolated { label?.stringValue = Self.workingText(since: started, generating: generating) }
+            MainActor.assumeIsolated { label?.stringValue = text() }
         }
         let row = NSStackView(views: [spinner, label])
         row.spacing = 8
+        if !steps.isEmpty {
+            let disclosure = NSButton(image: NSImage(systemSymbolName: stepsExpanded ? "chevron.down" : "chevron.right",
+                                                     accessibilityDescription: L("Show steps", "查看步骤"))!,
+                                      target: self, action: #selector(toggleSteps))
+            disclosure.isBordered = false
+            disclosure.contentTintColor = .tertiaryLabelColor
+            disclosure.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
+            disclosure.toolTip = stepsExpanded ? L("Hide steps", "收起步骤") : L("Show steps", "查看步骤")
+            row.addArrangedSubview(disclosure)
+        }
         return row
+    }
+
+    /// Whether the agent's steps are listed under the progress line; kept while the transcript redraws.
+    private var stepsExpanded = false
+    private var lastShown: (chat: AgentChat?, running: Bool, generating: Bool, liveText: String?, steps: [SnapokCloud.AgentStep], started: Date?)?
+
+    @objc private func toggleSteps() {
+        stepsExpanded.toggle()
+        guard let shown = lastShown else { return }
+        show(shown.chat, running: shown.running, generating: shown.generating, liveText: shown.liveText, steps: shown.steps, started: shown.started)
     }
 
     private static func workingText(since start: Date, generating: Bool) -> String {

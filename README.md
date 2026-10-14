@@ -13,7 +13,7 @@
 
 Snapok is a native screenshot utility built with Swift and AppKit. Its main window is a library of your past screenshots. Close that window to hide the Dock icon; Snapok stays in the menu bar, and the global hotkey keeps working.
 
-> Early development: builds from `dev` are previews, not stable releases. English is the default language; Simplified Chinese is available in Settings → General → Language (applies immediately).
+> Early development: builds from `dev` are previews, not stable releases. The app follows the system language (English or Simplified Chinese) by default; Settings → General → Language can pin either one (applies immediately).
 
 ## Features
 

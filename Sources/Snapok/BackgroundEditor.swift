@@ -84,6 +84,8 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     private var values: [NSTextField] = []
     private let shadowButton = NSButton(checkboxWithTitle: L("Soft shadow", "柔和阴影"), target: nil, action: nil)
     private var wallpaper: NSImage?
+    /// The screen the capture came from, whose wallpaper the "Desktop Wallpaper" background uses.
+    private let screen: NSScreen?
     private var customImage: NSImage?
     private var selectedBackground = 0
     private var usesCustomGradient = false
@@ -109,9 +111,8 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     init(image: NSImage, screen: NSScreen?, annotations: [Annotation] = [], style: BackgroundPreferences? = nil) {
         if let style { preferences = style }
         preview = BackgroundPreview(image: image, annotations: annotations)
-        if let screen = screen ?? NSScreen.main, let url = NSWorkspace.shared.desktopImageURL(for: screen) {
-            wallpaper = NSImage(contentsOf: url)
-        }
+        self.screen = screen ?? NSScreen.main
+        wallpaper = DesktopWallpaper.cached(for: self.screen)
         let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1060, height: 720),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = AppChannel.displayName + L(" · Edit Image", " · 编辑图片")
@@ -121,8 +122,11 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         [annotationColor, colorWell, borderColorWell, gradientStart, gradientEnd, watermarkColor].forEach { $0.useCompactSwatch() }
         window.delegate = self
         buildInterface()
+        // Read before `restorePreferences` falls back from a wallpaper it can't show yet.
+        let wantsWallpaper = preferences.backgroundType == 1
         restorePreferences()
         syncOriginalMode()
+        refreshWallpaper(select: wantsWallpaper)
         preview.onChange = { [weak self] in self?.syncTools() }
         preview.onCommand = { [weak self] action in self?.performQuickAction(action) }
         preview.onViewportChange = { [weak self] in self?.updateZoomLabel() }
@@ -742,14 +746,37 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
         changeBackground()
     }
 
+    /// Captures the wallpaper as the desktop shows it (the file is a placeholder for dynamic and Aerial wallpapers),
+    /// then shows it if the wallpaper background is chosen, or `select` asks for it.
+    private func refreshWallpaper(select: Bool, onFailure: (() -> Void)? = nil) {
+        Task { [weak self] in
+            guard let self else { return }
+            guard let fresh = await DesktopWallpaper.capture(for: screen) else {
+                if wallpaper == nil { onFailure?() }
+                return
+            }
+            wallpaper = fresh
+            guard select || backgroundPicker.selectedTag() == 1 else { return }
+            selectedBackground = 1
+            backgroundPicker.selectItem(withTag: 1)
+            preview.background = .image(fresh)
+        }
+    }
+
     @objc private func changeBackground() {
         let index = backgroundPicker.selectedTag()
         switch index {
         case 0: preview.background = usesCustomGradient ? customGradientBackground() : .gradient(selectedGradient)
         case 1:
             guard let wallpaper else {
-                backgroundPicker.selectItem(withTag: selectedBackground == 4 ? 0 : selectedBackground)
-                operationFeedback.showError(L("Unable to read the desktop wallpaper. Choose a local background image.", "无法读取当前壁纸，请选择本地背景图片。"), in: window)
+                // Not captured yet: try now, and only explain if that fails too.
+                let previous = selectedBackground == 4 ? 0 : selectedBackground
+                refreshWallpaper(select: true) { [weak self] in
+                    guard let self else { return }
+                    backgroundPicker.selectItem(withTag: previous)
+                    operationFeedback.showError(L("Unable to read the desktop wallpaper. Allow Screen Recording in System Settings, or choose a background image.",
+                                                  "无法读取当前壁纸。请在系统设置里允许屏幕录制，或选择背景图片。"), in: window)
+                }
                 return
             }
             preview.background = .image(wallpaper)
@@ -1046,9 +1073,9 @@ final class BackgroundEditorController: NSWindowController, NSWindowDelegate, NS
     @objc private func recognizeText() {
         Telemetry.capture("ai_used", ["feature": "ocr"])
         guard let image = annotatedSource else { return }
-        AIResultWindowController.show(title: L("Recognized Text", "识别出的文字"), markdown: false, near: window) {
-            let text = await TextScanner.scan(image).text
-            return text.isEmpty ? L("No text recognized.", "没有识别到文字。") : text
+        AIResultWindowController.show(title: L("Recognized Text", "识别出的文字"), markdown: false, autoCopy: true,
+                                      emptyText: L("No text recognized.", "没有识别到文字。"), near: window) {
+            await TextScanner.scan(image).text
         }
     }
 

@@ -384,13 +384,19 @@ final class AIResultWindowController: NSWindowController, NSWindowDelegate {
     private let textView = NSTextView(usingTextLayoutManager: false)
     private var resultMarkdown = ""
     private var rendersMarkdown = true
+    private var autoCopy = false
+    private var emptyText = ""
     private let spinner = NSProgressIndicator()
     private let status = NSTextField(labelWithString: "")
 
     /// `markdown: false` shows the text as is, keeping every line break (recognized text).
-    static func show(title: String, markdown: Bool = true, near parent: NSWindow?, work: @escaping @MainActor () async throws -> String) {
+    /// `autoCopy` puts a non-empty result on the clipboard as soon as it arrives; an empty one shows `emptyText` instead.
+    static func show(title: String, markdown: Bool = true, autoCopy: Bool = false, emptyText: String = L("No result.", "没有结果。"),
+                     near parent: NSWindow?, work: @escaping @MainActor () async throws -> String) {
         let controller = AIResultWindowController(title: title)
         controller.rendersMarkdown = markdown
+        controller.autoCopy = autoCopy
+        controller.emptyText = emptyText
         open.append(controller)
         if let parent {
             let frame = parent.frame
@@ -469,7 +475,11 @@ final class AIResultWindowController: NSWindowController, NSWindowDelegate {
             do {
                 let text = try await work()
                 resultMarkdown = text
-                if rendersMarkdown {
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    textView.string = emptyText
+                    textView.font = .systemFont(ofSize: 14)
+                    textView.textColor = .secondaryLabelColor
+                } else if rendersMarkdown {
                     textView.textStorage?.setAttributedString(MarkdownRenderer.render(text))
                 } else {
                     textView.string = text
@@ -477,6 +487,10 @@ final class AIResultWindowController: NSWindowController, NSWindowDelegate {
                     textView.textColor = .labelColor
                 }
                 status.stringValue = ""
+                if autoCopy, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    copyText()
+                    status.stringValue = L("Copied to clipboard.", "已复制到剪贴板。")
+                }
             } catch {
                 textView.string = ""
                 status.stringValue = error.localizedDescription
