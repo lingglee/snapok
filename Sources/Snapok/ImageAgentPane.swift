@@ -349,9 +349,19 @@ final class ImageAgentPane: NSView, NSSplitViewDelegate {
         }
         noticeLabelBeforeModel.isActive = !ownModelButton.isHidden
         noticeLabelBeforeButton.isActive = ownModelButton.isHidden
-        creditsButton.isHidden = account == nil
-        creditsButton.title = account.map { L("\($0.balance) credits", "\($0.balance) 积分") } ?? ""
-        creditsButton.contentTintColor = account.map { !$0.canAffordTurn } ?? false ? .systemOrange : .secondaryLabelColor
+        // Always an account entry: sign in when signed out (a user with their own model is never asked otherwise),
+        // the balance once the account has loaded.
+        if !SnapokCloud.isSignedIn {
+            creditsButton.title = L("Sign In", "登录")
+            creditsButton.image = NSImage(systemSymbolName: "person.crop.circle", accessibilityDescription: nil)
+            creditsButton.toolTip = L("Sign in to Snapok for cloud planning and image generation", "登录 Snapok，使用云端规划和图片生成")
+            creditsButton.contentTintColor = .secondaryLabelColor
+        } else {
+            creditsButton.title = account.map { L("\($0.balance) credits", "\($0.balance) 积分") } ?? L("Account", "账户")
+            creditsButton.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+            creditsButton.toolTip = L("Credits", "积分")
+            creditsButton.contentTintColor = account.map { !$0.canAffordTurn } ?? false ? .systemOrange : .secondaryLabelColor
+        }
         composer.isAvailable = canSend
         composer.isBusy = running
         composer.placeholder = chat == nil
@@ -496,7 +506,12 @@ final class ImageAgentPane: NSView, NSSplitViewDelegate {
     @objc private func openModels() { onOpenSettings?(.models) }
 
     @objc private func showAccountMenu(_ sender: NSButton) {
-        guard let account = SnapokCloud.account else { return }
+        guard SnapokCloud.isSignedIn else { SnapokCloud.signIn(); return }
+        guard let account = SnapokCloud.account else {
+            // Still loading, or the server was unreachable: try again.
+            Task { await SnapokCloud.refreshAccount() }
+            return
+        }
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.addItem(withTitle: account.email, action: nil, keyEquivalent: "").isEnabled = false

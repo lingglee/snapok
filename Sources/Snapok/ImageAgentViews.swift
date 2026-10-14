@@ -326,6 +326,11 @@ final class AgentTranscriptView: NSScrollView {
     private static func workingText(since start: Date, generating: Bool) -> String {
         let seconds = Int(Date().timeIntervalSince(start))
         guard generating else { return L("Working… \(seconds)s", "正在处理… \(seconds) 秒") }
+        if seconds >= 180 {
+            let limit = Int(ImageAgentStore.generationTimeout / 60)
+            return L("Still generating… \(seconds)s · taking longer than usual, stops after \(limit) minutes",
+                     "还在生成… \(seconds) 秒 · 比平时久，超过 \(limit) 分钟会自动停止")
+        }
         return L("Editing the image… \(seconds)s · usually 1–2 minutes", "正在改图… \(seconds) 秒 · 通常需要 1–2 分钟")
     }
 

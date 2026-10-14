@@ -151,6 +151,23 @@ final class ImageAgentStore {
         }
     }
 
+    /// Stops a generation that ran past `generationTimeout`, keeping its instruction so "Try Again" runs it again.
+    private func timeOut(_ chatID: String, run: UUID, instruction: String) {
+        guard let current = runs[chatID], current.id == run else { return }
+        log("image agent generation timed out")
+        current.task?.cancel()
+        finish(chatID)
+        let minutes = Int(Self.generationTimeout / 60)
+        let reply = AgentMessage(id: UUID(), role: .assistant,
+                                 text: L("This generation took over \(minutes) minutes, so it was stopped. Try again.",
+                                         "生成超过 \(minutes) 分钟还没完成，已自动停止，可以重试。"),
+                                 images: [], failed: true, pendingGeneration: instruction,
+                                 duration: Date().timeIntervalSince(current.started))
+        append(reply, to: chatID)
+        notify()
+        AgentNotifier.shared.taskFinished(chatID: chatID, title: chat(chatID)?.title ?? "", reply: reply)
+    }
+
     private func isCurrent(_ run: UUID, _ chatID: String) -> Bool {
         runs[chatID]?.id == run && !Task.isCancelled
     }
@@ -213,10 +230,21 @@ final class ImageAgentStore {
         }
     }
 
+    /// Longest a cloud generation may take, streaming plus picking up a lost result, before it is stopped.
+    /// They usually finish in 1–3 minutes; past this the server or the agent is stuck.
+    static let generationTimeout: TimeInterval = 10 * 60
+
     /// Runs a cloud generation; a failure keeps the instruction so "Try Again" runs it again.
     private func generate(_ instruction: String, images: [NSImage], chatID: String, run: UUID) async -> AgentMessage {
         guard isCurrent(run, chatID) else { return AgentMessage(id: UUID(), role: .assistant, text: "", images: []) }
         let sent = Date()
+        // Independent of the network: a stream that stalls without closing, or a result that stays "pending", still ends.
+        let watchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.generationTimeout))
+            guard !Task.isCancelled else { return }
+            self?.timeOut(chatID, run: run, instruction: instruction)
+        }
+        defer { watchdog.cancel() }
         generating.insert(chatID)
         startedAt[chatID] = sent
         runs[chatID]?.generation = instruction
@@ -267,7 +295,7 @@ final class ImageAgentStore {
                                         "这次生成没有拿到结果，可以重试，重新生成。"),
                                 images: [], failed: true, pendingGeneration: instruction)
         var errors = 0
-        while Date().timeIntervalSince(since) < 20 * 60 {
+        while Date().timeIntervalSince(since) < Self.generationTimeout {
             guard isCurrent(run, chatID) else { return lost }
             do {
                 switch try await SnapokCloud.generationResult(conversationID: chatID, since: since) {
