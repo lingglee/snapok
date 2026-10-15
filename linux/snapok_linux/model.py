@@ -35,10 +35,12 @@ class Document:
     image_path: Path
     annotations: list[Annotation] = dataclasses.field(default_factory=list)
     title: str = "Screenshot"
+    category: str = ""
     tags: list[str] = dataclasses.field(default_factory=list)
     identifier: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
     created_at: str = ""
     transient: bool = False
+    trashed: bool = False
     frame: dict[str, Any] = dataclasses.field(default_factory=lambda: {
         "enabled": False,
         "padding_x": 48,
@@ -61,6 +63,7 @@ class Document:
         return {
             "id": self.identifier,
             "title": self.title,
+            "category": self.category,
             "tags": self.tags,
             "created_at": self.created_at,
             "annotations": [item.to_dict() for item in self.annotations],
@@ -74,6 +77,7 @@ class Document:
             image_path=folder / "original.png",
             annotations=[Annotation.from_dict(item) for item in data.get("annotations", [])],
             title=data.get("title", "Screenshot"),
+            category=data.get("category", ""),
             tags=data.get("tags", []),
             identifier=data.get("id", folder.name),
             created_at=data.get("created_at", ""),

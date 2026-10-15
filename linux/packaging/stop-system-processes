@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+# A running Python process keeps the old modules in memory across a dpkg
+# upgrade. Stop only Snapok instances launched from the system package; user
+# libraries, settings, and unrelated Python processes are never touched.
+pattern='^python3 /usr/lib/snapok/snapok_linux\.py($| )'
+pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+[ -z "$pids" ] || kill $pids 2>/dev/null || true
+
+attempt=0
+while [ -n "$pids" ] && [ "$attempt" -lt 20 ]; do
+  sleep 0.1
+  pids="$(pgrep -f "$pattern" 2>/dev/null || true)"
+  attempt=$((attempt + 1))
+done
+
+[ -z "$pids" ] || kill -KILL $pids 2>/dev/null || true
+exit 0

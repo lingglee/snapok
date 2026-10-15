@@ -56,10 +56,10 @@ Or download **https://cdn.snapok.app/Snapok.dmg**, open it, and drag **Snapok.ap
 
 ### Ubuntu 22.04+
 
-The Ubuntu port is currently a source preview. It supports X11 region and scrolling capture, Wayland region capture through the secure desktop portal, annotations, mosaic/blur redaction, editable history, framing, pinned images, OCR, sensitive-text redaction, and an OpenAI-compatible image Agent.
+The Ubuntu port is currently a source preview. It supports X11 region and scrolling capture, Wayland region capture through the secure desktop portal, annotations, mosaic/blur redaction, editable history and Trash, categories and tags, framing, pinned images, OCR, and local sensitive-text redaction.
 
 ```bash
-sudo apt install python3-gi gir1.2-gtk-3.0 python3-pil python3-numpy python3-opencv libsecret-tools
+sudo apt install python3-gi gir1.2-gtk-3.0 python3-pil python3-numpy python3-opencv
 ./linux/snapok
 
 # Optional OCR and automatic sensitive-text redaction
@@ -70,41 +70,46 @@ Install for the current user with `./linux/install.sh`, or build an installable 
 
 #### Build and install the Ubuntu package
 
+One-command clean rebuild, old-package removal, installation, and launch:
+
+```bash
+cd /home/mdpi/workspace/snapok
+./linux/rebuild-install.sh
+```
+
+This preserves screenshots and settings. The equivalent command is
+`make linux-reinstall`.
+
 From the repository root, run the tests and build the current package:
 
 ```bash
 cd /home/mdpi/workspace/snapok
+./linux/uninstall-user.sh  # preserves screenshots and settings
 make linux-test
 make linux-package
 ```
 
-The current build produces `dist/snapok_0.1.3_amd64.deb`. Install it and start Snapok with:
+The current build produces `dist/snapok_0.1.4_amd64.deb`. Install it and start Snapok with:
 
 ```bash
-pkexec apt install -y "$PWD/dist/snapok_0.1.3_amd64.deb"
-snapok
+pkexec apt install -y "$PWD/dist/snapok_0.1.4_amd64.deb"
+/usr/bin/snapok
 ```
 
-To rebuild and reinstall the same version, first close that version's running instance and force the package reinstall:
+To rebuild and reinstall the same version, force the package reinstall. The package
+stops its old `/usr/lib/snapok` process before replacing files:
 
 ```bash
-gapplication action ai.thinkany.snapok.linux.v0_1_3 quit || true
 make linux-test
 make linux-package
-pkexec apt install --reinstall -y "$PWD/dist/snapok_0.1.3_amd64.deb"
-snapok
+pkexec apt install --reinstall -y "$PWD/dist/snapok_0.1.4_amd64.deb"
+/usr/bin/snapok
 ```
 
-For a new release, update `__version__` in `linux/snapok_linux/__init__.py`, then pass the same version to the package builder. For example:
-
-```bash
-SNAPOK_VERSION=0.1.4
-VERSION="$SNAPOK_VERSION" ./linux/build-deb.sh
-pkexec apt install -y "$PWD/dist/snapok_${SNAPOK_VERSION}_amd64.deb"
-snapok
-```
-
-Incrementing the version is recommended for feature updates because the newly launched version automatically closes older Snapok instances. More Ubuntu-specific details are in [`linux/README.md`](linux/README.md).
+For a new release, update only `__version__` in `linux/snapok_linux/__init__.py`;
+the package builder reads it automatically. Incrementing the version lets the
+new application close older versioned instances. More Ubuntu-specific details
+are in [`linux/README.md`](linux/README.md).
 
 ## Install a development build
 

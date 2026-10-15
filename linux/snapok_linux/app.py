@@ -17,7 +17,6 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk
 
 from . import __version__
 from .capture import CaptureError, RegionSelector, capture_screen
-from .ai import AIError, SecretStore
 from .editor import EditorWindow
 from .history import HistoryStore, Settings
 from .hotkey import X11HotKey
@@ -75,6 +74,7 @@ def icon_path() -> Path | None:
     package = Path(__file__).resolve().parent
     candidates = [
         package.parent / "AppIcon.png",
+        Path("/usr/share/icons/hicolor/256x256/apps/ai.thinkany.snapok.png"),
         package.parent.parent / "Sources" / "Snapok" / "Resources" / "AppIcon.png",
     ]
     return next((path for path in candidates if path.exists()), None)
@@ -97,6 +97,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.search = Gtk.SearchEntry()
         self.search.set_placeholder_text("Search title or tags")
         self.search.connect("search-changed", lambda *_: self.refresh())
+        self.category_filter = Gtk.ComboBoxText()
+        self._refreshing_filters = False
+        self.category_filter.connect("changed", self._category_changed)
         self.empty = Gtk.Label(label="No screenshots yet\nPress Ctrl+Shift+P or click New capture")
         self.empty.set_justify(Gtk.Justification.CENTER)
         self.add(self._build())
@@ -116,12 +119,8 @@ class MainWindow(Gtk.ApplicationWindow):
         library_nav = css(Gtk.ToggleButton(label="▣   Library"), "nav-button", "nav-selected")
         library_nav.set_active(True)
         library_nav.set_halign(Gtk.Align.FILL)
-        agent_nav = css(Gtk.Button(label="✦   Snapok Agent"), "nav-button")
-        agent_nav.set_halign(Gtk.Align.FILL)
-        agent_nav.connect("clicked", lambda *_: self.snapok.agent_without_image(self))
         nav = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_start=14, margin_end=14)
         nav.pack_start(library_nav, False, False, 0)
-        nav.pack_start(agent_nav, False, False, 0)
         sidebar.pack_start(nav, False, False, 0)
 
         sidebar.pack_start(Gtk.Box(), True, True, 0)
@@ -138,7 +137,9 @@ class MainWindow(Gtk.ApplicationWindow):
         take = css(Gtk.Button(label="Take Screenshot"), "accent-button")
         take.connect("clicked", lambda *_: self.snapok.start_capture())
         shortcut.pack_start(take, False, False, 0)
-        scroll_capture = css(Gtk.Button(label="Scrolling Capture"), "flat-action")
+        scroll_shortcut = str(self.snapok.settings["scroll_hotkey"])
+        scroll_capture = css(Gtk.Button(label=f"Scrolling Capture   {scroll_shortcut}"), "flat-action")
+        scroll_capture.set_tooltip_text(f"{scroll_shortcut} — captures the screen under the pointer")
         scroll_capture.connect("clicked", lambda *_: self.snapok.start_capture(scrolling=True))
         shortcut.pack_start(scroll_capture, False, False, 0)
         sidebar.pack_start(shortcut, False, False, 0)
@@ -159,8 +160,10 @@ class MainWindow(Gtk.ApplicationWindow):
         titles.pack_start(self.subtitle, False, False, 0)
         heading.pack_start(titles, True, True, 0)
         self.search.set_size_request(320, 38)
-        self.search.set_placeholder_text("Search titles, tags, or text in screenshots")
+        self.search.set_placeholder_text("Search names, categories, or tags")
         heading.pack_end(self.search, False, False, 0)
+        self.category_filter.set_size_request(170, 38)
+        heading.pack_end(self.category_filter, False, False, 0)
         page.pack_start(heading, False, False, 0)
         self.group_title = css(Gtk.Label(label="Today", xalign=0), "section-title")
         self.group_title.set_margin_top(28); self.group_title.set_margin_bottom(12)
@@ -180,13 +183,37 @@ class MainWindow(Gtk.ApplicationWindow):
         return root
 
     def refresh(self) -> None:
+        selected_id = self.category_filter.get_active_id() or "__all__"
+        self._refreshing_filters = True
+        self.category_filter.remove_all()
+        self.category_filter.append("__all__", "All categories")
+        self.category_filter.append("__uncategorized__", "Unfiled")
+        for category in self.snapok.store.categories():
+            self.category_filter.append(category, category)
+        self.category_filter.append("__trash__", "Trash")
+        self.category_filter.set_active_id(selected_id)
+        if self.category_filter.get_active() < 0:
+            selected_id = "__all__"
+            self.category_filter.set_active_id("__all__")
+        self._refreshing_filters = False
+        selected_filter = "" if selected_id == "__all__" else selected_id
         for child in self.flow.get_children():
             self.flow.remove(child)
-        documents = self.snapok.store.list(self.search.get_text())
+        if selected_filter == "__trash__":
+            documents = self.snapok.store.list_trashed(self.search.get_text())
+        else:
+            documents = self.snapok.store.list(self.search.get_text(), selected_filter)
         days = int(self.snapok.settings["retention_days"])
         kept = "forever" if days <= 0 else f"for {days} days"
-        self.subtitle.set_text(f"{len(documents)} screenshots · Kept {kept} · Double-click to edit")
-        self.group_title.set_text(f"Today · {len(documents)}")
+        if selected_filter == "__trash__":
+            self.subtitle.set_text(f"{len(documents)} items in Trash · Restore or delete permanently")
+            self.group_title.set_text(f"Trash · {len(documents)}")
+        else:
+            self.subtitle.set_text(f"{len(documents)} screenshots · Kept {kept} · Double-click to edit")
+            label = "All screenshots" if not selected_filter else (
+                "Unfiled" if selected_filter == "__uncategorized__" else selected_filter
+            )
+            self.group_title.set_text(f"{label} · {len(documents)}")
         self.empty.set_visible(not documents)
         for document in documents:
             self.flow.add(self._card(document))
@@ -208,17 +235,131 @@ class MainWindow(Gtk.ApplicationWindow):
         title = css(Gtk.Label(label=document.title, xalign=0), "card-title")
         title.set_ellipsize(3)
         date = document.created_at[:10] if document.created_at else ""
-        detail = Gtk.Label(label=date, xalign=0)
+        detail_text = "Trash" if document.trashed else (document.category or "Unfiled")
+        detail = Gtk.Label(label=f"{detail_text}  ·  {date}", xalign=0)
         detail.get_style_context().add_class("dim-label")
+        metadata = Gtk.Box(spacing=6)
+        metadata.pack_start(detail, True, True, 0)
+        more = css(Gtk.Button(label="⋮"), "card-menu-button")
+        more.set_tooltip_text("File actions")
+        more.connect("clicked", self._show_document_menu, document)
+        metadata.pack_end(more, False, False, 0)
         box.pack_start(frame, True, True, 0)
         box.pack_start(title, False, False, 0)
-        box.pack_start(detail, False, False, 0)
+        box.pack_start(metadata, False, False, 0)
         child.add(box)
         child.set_tooltip_text("Double-click to edit")
+        child.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        child.connect("button-press-event", self._card_button_press, document)
         return child
 
     def _activated(self, _flow, child) -> None:
-        self.snapok.open_editor(child.document)
+        if not child.document.trashed:
+            self.snapok.open_editor(child.document)
+
+    def _category_changed(self, *_args) -> None:
+        if not self._refreshing_filters:
+            self.refresh()
+
+    def _card_button_press(self, child, event, document: Document) -> bool:
+        if event.button == 3:
+            self._show_document_menu(child, document)
+            return True
+        return False
+
+    def _show_document_menu(self, button, document: Document) -> None:
+        menu = Gtk.Menu()
+        actions = (
+            [("Restore", self._restore_document), ("Delete permanently…", self._delete_permanently)]
+            if document.trashed
+            else [
+                ("Open", lambda item: self.snapok.open_editor(item)),
+                ("Rename…", self._rename_document),
+                ("Organize…", self._organize_document),
+                ("Move to Trash…", self._trash_document),
+            ]
+        )
+        for label, callback in actions:
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", lambda _item, cb=callback: cb(document))
+            menu.append(item)
+        menu.show_all()
+        menu.popup_at_widget(button, Gdk.Gravity.SOUTH_EAST, Gdk.Gravity.NORTH_EAST, None)
+
+    def _rename_document(self, document: Document) -> None:
+        dialog = Gtk.Dialog(title="Rename screenshot", transient_for=self, modal=True)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Rename", Gtk.ResponseType.OK)
+        entry = Gtk.Entry(text=document.title)
+        entry.set_activates_default(True)
+        entry.set_margin_start(16); entry.set_margin_end(16)
+        entry.set_margin_top(16); entry.set_margin_bottom(16)
+        dialog.get_content_area().add(entry)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK and entry.get_text().strip():
+            document.title = entry.get_text().strip()
+            self.snapok.store.update_metadata(document)
+            self.refresh()
+        dialog.destroy()
+
+    def _organize_document(self, document: Document) -> None:
+        dialog = Gtk.Dialog(title="Organize screenshot", transient_for=self, modal=True)
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Save", Gtk.ResponseType.OK)
+        grid = Gtk.Grid(column_spacing=12, row_spacing=12, margin=16)
+        category = Gtk.ComboBoxText.new_with_entry()
+        known = self.snapok.store.categories()
+        for value in dict.fromkeys(["Work", "Personal", "Reference", "Receipts", *known]):
+            category.append_text(value)
+        category.get_child().set_text(document.category)
+        tags = Gtk.Entry(text=", ".join(document.tags))
+        tags.set_placeholder_text("project, important, client")
+        grid.attach(Gtk.Label(label="Category", xalign=1), 0, 0, 1, 1)
+        grid.attach(category, 1, 0, 1, 1)
+        grid.attach(Gtk.Label(label="Tags", xalign=1), 0, 1, 1, 1)
+        grid.attach(tags, 1, 1, 1, 1)
+        dialog.get_content_area().add(grid)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            document.category = category.get_child().get_text().strip()
+            document.tags = list(dict.fromkeys(
+                value.strip() for value in tags.get_text().split(",") if value.strip()
+            ))
+            self.snapok.store.update_metadata(document)
+            self.refresh()
+        dialog.destroy()
+
+    def _confirm(self, title: str, details: str, action: str) -> bool:
+        dialog = Gtk.MessageDialog(
+            self, Gtk.DialogFlags.MODAL, Gtk.MessageType.WARNING, Gtk.ButtonsType.CANCEL, title
+        )
+        dialog.format_secondary_text(details)
+        dialog.add_button(action, Gtk.ResponseType.OK)
+        accepted = dialog.run() == Gtk.ResponseType.OK
+        dialog.destroy()
+        return accepted
+
+    def _trash_document(self, document: Document) -> None:
+        if self._confirm("Move screenshot to Trash?", document.title, "Move to Trash"):
+            self.snapok.store.trash(document)
+            self.refresh()
+
+    def _restore_document(self, document: Document) -> None:
+        try:
+            self.snapok.store.restore(document)
+        except FileExistsError as error:
+            self.snapok.error("Could not restore screenshot", str(error))
+        self.refresh()
+
+    def _delete_permanently(self, document: Document) -> None:
+        if self._confirm(
+            "Delete screenshot permanently?",
+            f"{document.title}\nThis cannot be undone.",
+            "Delete permanently",
+        ):
+            self.snapok.store.delete(document)
+            self.refresh()
 
     def _hide_on_close(self, *_args) -> bool:
         self.hide()
@@ -234,12 +375,16 @@ class SnapokApplication(Gtk.Application):
         self.selector: RegionSelector | None = None
         self.editors: list[EditorWindow] = []
         self.hotkey: X11HotKey | None = None
+        self.scroll_hotkey: X11HotKey | None = None
         self.tray = None
         self.capture_mode = "normal"
         self.scroll_window: ScrollCaptureWindow | None = None
 
     def do_startup(self) -> None:
         Gtk.Application.do_startup(self)
+        icon = icon_path()
+        if icon:
+            Gtk.Window.set_default_icon_from_file(str(icon))
         install_styles()
         self.store.prune(int(self.settings["retention_days"]))
         quit_action = Gio.SimpleAction.new("quit", None)
@@ -260,6 +405,8 @@ class SnapokApplication(Gtk.Application):
     def _start_hotkey(self) -> None:
         self.hotkey = X11HotKey(self.start_capture)
         self.hotkey.start(str(self.settings["hotkey"]))
+        self.scroll_hotkey = X11HotKey(lambda: self.start_capture(scrolling=True))
+        self.scroll_hotkey.start(str(self.settings["scroll_hotkey"]))
 
     def _create_tray(self, icon: Path | None) -> None:
         if not hasattr(Gtk, "StatusIcon"):
@@ -291,22 +438,11 @@ class SnapokApplication(Gtk.Application):
             self.main_window.show_all()
             self.main_window.present()
 
-    def agent_without_image(self, parent: Gtk.Window) -> None:
-        dialog = Gtk.MessageDialog(
-            parent,
-            Gtk.DialogFlags.MODAL,
-            Gtk.MessageType.INFO,
-            Gtk.ButtonsType.OK,
-            "Snapok Agent",
-        )
-        dialog.format_secondary_text(
-            "Open a screenshot from the Library, then choose AI Tools → Ask Snapok Agent. "
-            "The Agent can inspect, redact, label, and translate the selected image."
-        )
-        dialog.run()
-        dialog.destroy()
-
     def start_capture(self, scrolling: bool = False) -> bool:
+        if self.scroll_window is not None:
+            if scrolling:
+                self.scroll_window.finish()
+            return False
         if self.selector is not None:
             return False
         if scrolling and (os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland" or os.environ.get("WAYLAND_DISPLAY")):
@@ -344,7 +480,12 @@ class SnapokApplication(Gtk.Application):
 
     def _selected(self, image: Image.Image, rect: tuple[int, int, int, int]) -> None:
         if self.capture_mode == "scroll":
-            self.scroll_window = ScrollCaptureWindow(image, rect, self._scroll_finished)
+            self.scroll_window = ScrollCaptureWindow(
+                image,
+                rect,
+                self._scroll_finished,
+                finish_shortcut=str(self.settings["scroll_hotkey"]),
+            )
             self.scroll_window.connect("destroy", self._scroll_closed)
             return
         document = self.store.create(image, transient=not bool(self.settings["auto_save"]))
@@ -391,8 +532,8 @@ class SnapokApplication(Gtk.Application):
         if icon:
             profile.pack_start(Gtk.Image.new_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file_at_scale(str(icon), 42, 42, True)), False, False, 0)
         profile_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        profile_text.pack_start(css(Gtk.Label(label="Snapok User", xalign=0), "section-title"), False, False, 0)
-        profile_text.pack_start(css(Gtk.Label(label="Avatar and nickname", xalign=0), "muted"), False, False, 0)
+        profile_text.pack_start(css(Gtk.Label(label="Snapok", xalign=0), "section-title"), False, False, 0)
+        profile_text.pack_start(css(Gtk.Label(label="Local screenshot library", xalign=0), "muted"), False, False, 0)
         profile.pack_start(profile_text, True, True, 0)
         sidebar.pack_start(profile, False, False, 8)
 
@@ -400,8 +541,7 @@ class SnapokApplication(Gtk.Application):
         stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
         stack.set_transition_duration(120)
         nav_group = None
-        for key, label in [("general", "⚙   General"), ("ai", "✦   AI Features"),
-                           ("models", "▣   Models"), ("about", "ⓘ   About")]:
+        for key, label in [("general", "⚙   General"), ("about", "ⓘ   About")]:
             button = css(Gtk.RadioButton.new_with_label_from_widget(nav_group, label), "nav-button")
             if nav_group is None:
                 nav_group = button
@@ -419,11 +559,8 @@ class SnapokApplication(Gtk.Application):
         retention.set_active_id(str(self.settings["retention_days"]))
         hotkey = Gtk.Entry(text=str(self.settings["hotkey"]))
         hotkey.set_tooltip_text("Restart Snapok after changing the global shortcut")
-        ai_url = Gtk.Entry(text=str(self.settings["ai_base_url"]))
-        ai_model = Gtk.Entry(text=str(self.settings["ai_model"]))
-        ai_key = Gtk.Entry()
-        ai_key.set_visibility(False)
-        ai_key.set_placeholder_text("Stored in Ubuntu Keyring; leave blank to keep it")
+        scroll_hotkey = Gtk.Entry(text=str(self.settings["scroll_hotkey"]))
+        scroll_hotkey.set_tooltip_text("Move the pointer to the target screen, then press this shortcut")
 
         def page(title: str, subtitle: str) -> tuple[Gtk.Box, Gtk.Box]:
             outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=38)
@@ -437,14 +574,14 @@ class SnapokApplication(Gtk.Application):
         general, general_card = page("General", "Appearance, shortcuts, and screenshot storage preferences.")
         grid = Gtk.Grid(column_spacing=18, row_spacing=14)
         rows = [("Automatically save screenshots", auto_save), ("Keep screenshots", retention),
-                ("Screenshot shortcut", hotkey)]
+                ("Screenshot shortcut", hotkey), ("Scrolling capture shortcut", scroll_hotkey)]
         for row, (label, widget) in enumerate(rows):
             grid.attach(Gtk.Label(label=label, xalign=1), 0, row, 1, 1)
             grid.attach(widget, 1, row, 1, 1)
         library_path = css(Gtk.Label(label=str(self.store.root), xalign=0), "muted")
         library_path.set_line_wrap(True)
-        grid.attach(Gtk.Label(label="Library", xalign=1), 0, 3, 1, 1)
-        grid.attach(library_path, 1, 3, 1, 1)
+        grid.attach(Gtk.Label(label="Library", xalign=1), 0, 4, 1, 1)
+        grid.attach(library_path, 1, 4, 1, 1)
         general_card.pack_start(grid, False, False, 0)
         note = Gtk.Label(
             label="Wayland capture uses the secure desktop screenshot portal.\n"
@@ -455,20 +592,6 @@ class SnapokApplication(Gtk.Application):
         note.set_line_wrap(True)
         general_card.pack_start(note, False, False, 0)
         stack.add_named(general, "general")
-
-        ai_page, ai_card = page("AI Features", "Choose how Snapok Agent analyzes and edits screenshots.")
-        ai_note = Gtk.Label(label="The Linux Agent uses your configured OpenAI-compatible model. Image edits are planned by the model and drawn locally with Snapok tools.", xalign=0)
-        ai_note.set_line_wrap(True)
-        ai_card.pack_start(ai_note, False, False, 0)
-        stack.add_named(ai_page, "ai")
-
-        models, model_card = page("Models", "Configure an OpenAI-compatible vision model.")
-        model_grid = Gtk.Grid(column_spacing=18, row_spacing=14)
-        for row, (label, widget) in enumerate([("Base URL", ai_url), ("Model", ai_model), ("API key", ai_key)]):
-            model_grid.attach(Gtk.Label(label=label, xalign=1), 0, row, 1, 1)
-            model_grid.attach(widget, 1, row, 1, 1)
-        model_card.pack_start(model_grid, False, False, 0)
-        stack.add_named(models, "models")
 
         about, about_card = page("About", "Snapok for Ubuntu")
         about_card.pack_start(Gtk.Label(label=f"Version {__version__}\nNative GTK Linux preview\nAGPL-3.0", xalign=0), False, False, 0)
@@ -488,13 +611,7 @@ class SnapokApplication(Gtk.Application):
         self.settings["auto_save"] = auto_save.get_active()
         self.settings["retention_days"] = int(retention.get_active_id() or 30)
         self.settings["hotkey"] = hotkey.get_text().strip() or "Ctrl+Shift+P"
-        self.settings["ai_base_url"] = ai_url.get_text().strip() or "https://api.openai.com/v1"
-        self.settings["ai_model"] = ai_model.get_text().strip() or "gpt-4.1-mini"
-        if ai_key.get_text().strip():
-            try:
-                SecretStore.set(ai_key.get_text().strip())
-            except AIError as error:
-                self.error("Could not save API key", str(error))
+        self.settings["scroll_hotkey"] = scroll_hotkey.get_text().strip() or "Ctrl+Shift+O"
         dialog.destroy()
 
     def error(self, title: str, details: str) -> None:
@@ -512,6 +629,8 @@ class SnapokApplication(Gtk.Application):
     def do_shutdown(self) -> None:
         if self.hotkey:
             self.hotkey.stop()
+        if self.scroll_hotkey:
+            self.scroll_hotkey.stop()
         Gtk.Application.do_shutdown(self)
 
 

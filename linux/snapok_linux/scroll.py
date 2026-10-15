@@ -13,6 +13,12 @@ from gi.repository import Gdk, GLib, Gtk
 
 from .capture import capture_x11
 
+
+SAMPLE_INTERVAL_MS = 160
+AUTO_SCROLL_INTERVAL_MS = 260
+AUTO_STALL_SAMPLES = 18
+AUTO_START_DELAY_MS = 650
+
 try:
     import cv2
 except ImportError:  # Ubuntu's OpenCV package is recommended; a slower fallback remains available.
@@ -79,13 +85,18 @@ class ScrollStitcher:
         self.result = self.last.copy()
         self.frames = 1
         self.fixed_bottom = 0
+        self.alignment_lost = False
 
     def add(self, frame: Image.Image) -> bool:
         frame = frame.convert("RGB")
         shift, confidence, _fixed_top, fixed_bottom = estimate_scroll(self.last, frame)
         if confidence < 0.58 or shift < 3:
-            self.last = frame
+            # A rejected frame must not become the next alignment anchor. Doing
+            # that silently accepts the tail after a large scroll jump and drops
+            # everything between the last good frame and that tail.
+            self.alignment_lost = confidence < 0.58
             return False
+        self.alignment_lost = False
         fixed_bottom = min(fixed_bottom, frame.height // 3)
         if self.fixed_bottom:
             self.result = self.result.crop((0, 0, self.result.width, self.result.height - self.fixed_bottom))
@@ -106,31 +117,46 @@ class ScrollStitcher:
 
 
 class ScrollCaptureWindow(Gtk.Window):
-    def __init__(self, initial: Image.Image, rect: tuple[int, int, int, int], on_finished) -> None:
+    def __init__(
+        self,
+        initial: Image.Image,
+        rect: tuple[int, int, int, int],
+        on_finished,
+        finish_shortcut: str = "Ctrl+Shift+O",
+    ) -> None:
         super().__init__(title="Scrolling capture")
         self.rect = rect
         self.on_finished = on_finished
         self.stitcher = ScrollStitcher(initial)
         self.timer = 0
         self.auto_timer = 0
+        self.auto_start_timer = 0
         self.stalled_samples = 0
+        self.pointer_paused = False
+        self.finish_shortcut = finish_shortcut
         self.set_keep_above(True)
         self.set_skip_taskbar_hint(True)
         self.set_resizable(False)
         self.set_default_size(340, 120)
         self.connect("destroy", self._destroyed)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
-        self.status = Gtk.Label(label="Scroll inside the selected area. Snapok will add overlapping frames.", xalign=0)
+        automatic_available = shutil.which("xdotool") is not None
+        initial_status = (
+            "Automatic capture will start shortly. Keep the target window unobstructed."
+            if automatic_available
+            else "Scroll slowly inside the selected area. Install xdotool to capture automatically."
+        )
+        self.status = Gtk.Label(label=initial_status, xalign=0)
         self.status.set_line_wrap(True)
         actions = Gtk.Box(spacing=8)
         cancel = Gtk.Button(label="Cancel")
         cancel.connect("clicked", lambda *_: self.destroy())
-        finish = Gtk.Button(label="Done")
+        finish = Gtk.Button(label="Done here")
         finish.get_style_context().add_class("suggested-action")
         finish.connect("clicked", self._finish)
-        self.auto = Gtk.ToggleButton(label="Scroll automatically")
-        self.auto.set_sensitive(shutil.which("xdotool") is not None)
-        self.auto.set_tooltip_text("Uses xdotool to scroll the selected X11 region")
+        self.auto = Gtk.ToggleButton(label="Start automatic capture")
+        self.auto.set_sensitive(automatic_available)
+        self.auto.set_tooltip_text("Scrolls in small steps while Snapok captures every section")
         self.auto.connect("toggled", self._toggle_auto)
         actions.pack_start(self.auto, False, False, 0)
         actions.pack_end(finish, False, False, 0)
@@ -140,7 +166,36 @@ class ScrollCaptureWindow(Gtk.Window):
         self.add(box)
         self.show_all()
         self._place_outside_region()
-        self.timer = GLib.timeout_add(450, self._sample)
+        # Capture often enough that ordinary wheel/trackpad scrolling still
+        # leaves a generous overlap between consecutive frames.
+        self.timer = GLib.timeout_add(SAMPLE_INTERVAL_MS, self._sample)
+        if automatic_available:
+            self.auto_start_timer = GLib.timeout_add(AUTO_START_DELAY_MS, self._start_auto)
+
+    def _start_auto(self) -> bool:
+        self.auto_start_timer = 0
+        if self.get_visible() and self.auto.get_sensitive():
+            left, top, right, bottom = self.rect
+            executable = shutil.which("xdotool")
+            if executable:
+                subprocess.run(
+                    [executable, "mousemove", str((left + right) // 2), str((top + bottom) // 2)],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            self.auto.set_active(True)
+        return False
+
+    def _pointer_is_inside_capture(self) -> bool:
+        display = Gdk.Display.get_default()
+        seat = display.get_default_seat() if display else None
+        pointer = seat.get_pointer() if seat else None
+        if not pointer:
+            return True
+        _screen, x, y = pointer.get_position()
+        left, top, right, bottom = self.rect
+        return left <= x < right and top <= y < bottom
 
     def _place_outside_region(self) -> None:
         screen = Gdk.Screen.get_default()
@@ -160,12 +215,20 @@ class ScrollCaptureWindow(Gtk.Window):
             frame = capture_x11().crop(self.rect)
             if self.stitcher.add(frame):
                 self.stalled_samples = 0
+                action = "Capturing automatically" if self.auto.get_active() else "Keep scrolling slowly"
                 self.status.set_text(
-                    f"Captured {self.stitcher.frames} frames — {self.stitcher.result.height:,} px tall. Keep scrolling or click Done."
+                    f"Captured {self.stitcher.frames} frames — {self.stitcher.result.height:,} px tall. "
+                    f"{action}; press {self.finish_shortcut} again to finish here."
+                )
+            elif self.stitcher.alignment_lost:
+                if self.auto.get_active():
+                    self.auto.set_active(False)
+                self.status.set_text(
+                    "Overlap was lost, so this frame was not added. Scroll back slightly, then continue more slowly."
                 )
             elif self.auto.get_active():
                 self.stalled_samples += 1
-                if self.stalled_samples >= 8:
+                if self.stalled_samples >= AUTO_STALL_SAMPLES:
                     self.auto.set_active(False)
                     self.status.set_text("Automatic scrolling reached the end or lost alignment. Click Done, or scroll manually.")
         except Exception as error:
@@ -175,10 +238,13 @@ class ScrollCaptureWindow(Gtk.Window):
     def _toggle_auto(self, button: Gtk.ToggleButton) -> None:
         if button.get_active():
             self.stalled_samples = 0
-            button.set_label("Stop automatic scroll")
-            self.auto_timer = GLib.timeout_add(850, self._auto_scroll)
+            button.set_label("Pause automatic capture")
+            self.status.set_text(
+                f"Capturing automatically. Move the pointer outside to pause; press {self.finish_shortcut} again to finish."
+            )
+            self.auto_timer = GLib.timeout_add(AUTO_SCROLL_INTERVAL_MS, self._auto_scroll)
         else:
-            button.set_label("Scroll automatically")
+            button.set_label("Resume automatic capture")
             if self.auto_timer:
                 GLib.source_remove(self.auto_timer)
                 self.auto_timer = 0
@@ -188,11 +254,21 @@ class ScrollCaptureWindow(Gtk.Window):
         if not executable:
             self.auto.set_active(False)
             return False
-        left, top, right, bottom = self.rect
-        x, y = (left + right) // 2, (top + bottom) // 2
+        if not self._pointer_is_inside_capture():
+            if not self.pointer_paused:
+                self.pointer_paused = True
+                self.status.set_text(
+                    f"Paused at this position. Click Done here or press {self.finish_shortcut}; move the pointer back to resume."
+                )
+            return True
+        if self.pointer_paused:
+            self.pointer_paused = False
+            self.status.set_text(
+                f"Automatic capture resumed. Press {self.finish_shortcut} again at the endpoint."
+            )
         try:
             subprocess.run(
-                [executable, "mousemove", str(x), str(y), "click", "--repeat", "5", "--delay", "35", "5"],
+                [executable, "click", "5"],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -203,8 +279,14 @@ class ScrollCaptureWindow(Gtk.Window):
         return True
 
     def _finish(self, *_args) -> None:
+        # Include the exact screen the user stopped on even if the periodic
+        # sampler has not fired since the last automatic scroll step.
+        self._sample()
         self.on_finished(self.stitcher.result)
         self.destroy()
+
+    def finish(self) -> None:
+        self._finish()
 
     def _destroyed(self, *_args) -> None:
         if self.timer:
@@ -213,3 +295,6 @@ class ScrollCaptureWindow(Gtk.Window):
         if self.auto_timer:
             GLib.source_remove(self.auto_timer)
             self.auto_timer = 0
+        if self.auto_start_timer:
+            GLib.source_remove(self.auto_start_timer)
+            self.auto_start_timer = 0

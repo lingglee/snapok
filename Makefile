@@ -1,4 +1,4 @@
-.PHONY: dev build release test linux linux-package linux-test
+.PHONY: dev build release test linux linux-package linux-test linux-reinstall
 
 # Build and launch Snapok Dev, rebuilding and relaunching on source changes.
 dev:
@@ -27,3 +27,7 @@ linux-package:
 # Run Linux core tests without opening a window.
 linux-test:
 	@./linux/test.sh
+
+# Remove older Linux installations, rebuild the Debian package, install it, and launch it.
+linux-reinstall:
+	@./linux/rebuild-install.sh

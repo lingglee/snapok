@@ -7,6 +7,9 @@ BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 
 mkdir -p "$APP_DIR" "$BIN_DIR" "$DESKTOP_DIR"
+# Replace application code as a unit so removed modules do not linger after an
+# upgrade. User screenshots live in "$APP_DIR/history" and are left untouched.
+rm -rf "$APP_DIR/snapok_linux"
 cp -R "$SOURCE_DIR/snapok_linux.py" "$SOURCE_DIR/snapok_linux" "$APP_DIR/"
 cp "$SOURCE_DIR/../Sources/Snapok/Resources/AppIcon.png" "$APP_DIR/AppIcon.png"
 ln -sfn "$APP_DIR/snapok_linux.py" "$BIN_DIR/snapok"

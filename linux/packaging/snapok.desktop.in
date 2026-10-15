@@ -8,3 +8,4 @@ Terminal=false
 Categories=Graphics;Utility;
 Keywords=screenshot;capture;annotation;image;
 StartupNotify=true
+StartupWMClass=Snapok_linux.py

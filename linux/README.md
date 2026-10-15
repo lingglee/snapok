@@ -24,10 +24,26 @@ Then run:
 - Select the hand tool or press `H`, then drag with the left mouse button to pan.
 - Hold `Space` and drag for temporary panning, or drag with the middle mouse button from any tool.
 
-On X11, the default global shortcut is `Ctrl+Shift+P`. On Wayland, use the
+On X11, the default global shortcut is `Ctrl+Shift+P`; scrolling capture is
+`Ctrl+Shift+O`. Move the pointer onto the screen you want before pressing a
+shortcut: the region selector opens on the monitor under the pointer. On Wayland, use the
 desktop's screenshot shortcut or the **New capture** button until the desktop
 portal exposes the Global Shortcuts interface. Screen capture itself uses the
 standard `org.freedesktop.portal.Screenshot` portal on Wayland.
+
+Scrolling capture is available on X11. Press `Ctrl+Shift+O` and select the
+scrolling content area (not the browser chrome). When `xdotool` is installed,
+Snapok automatically scrolls in small steps and captures every section; click
+**Done here** or press `Ctrl+Shift+O` again at the endpoint you choose. Move the
+pointer outside the capture area to pause and inspect the current position; move
+it back inside to resume. Wayland deliberately prevents the continuous
+silent screen reads this feature requires.
+
+Without `xdotool`, scroll at a steady pace so adjacent frames overlap. Snapok
+samples several times per second; if overlap is lost, it pauses instead of
+silently joining a later frame and tells you to scroll back slightly. A generic
+desktop capture cannot read content an application has not rendered yet, so
+automatic scroll-and-capture is used to provide the full-page experience.
 
 ## Install for the current user
 
@@ -36,45 +52,75 @@ standard `org.freedesktop.portal.Screenshot` portal on Wayland.
 ```
 
 This installs only launchers and application files under `~/.local`; it does
-not use `sudo` or change system packages.
+not use `sudo` or change system packages. Reinstalling replaces the application
+code but preserves the screenshot library in `~/.local/share/snapok/history`.
+
+## Library management
+
+Each screenshot card has a **⋮** menu (also available with right-click) for
+opening, renaming, organizing, or moving the item to Trash. **Organize** assigns
+one category and any number of comma-separated tags. Use the category filter at
+the top of Library to show a category, unfiled screenshots, or Trash. Trashed
+items can be restored or deleted permanently; search matches names, categories,
+and tags.
 
 ## Build and install a Debian package
 
-Run these commands from the repository root:
+For a one-command clean rebuild, package replacement, and launch:
 
 ```bash
 cd /home/mdpi/workspace/snapok
-make linux-test
-make linux-package
-pkexec apt install -y "$PWD/dist/snapok_0.1.3_amd64.deb"
-snapok
+./linux/rebuild-install.sh
 ```
 
-The package is written to `dist/`. If you rebuild the same version, close its
-running instance and use `--reinstall` so APT replaces the installed files:
+The script preserves screenshots and settings, removes the per-user application,
+stops old background processes, runs tests, rebuilds the package, purges the old
+Debian package, installs the new package, launches `/usr/bin/snapok`, and verifies
+that the system-package process remains running. The equivalent Make target is
+`make linux-reinstall`.
+
+For the same steps manually:
+
+Do not keep both the per-user installation and Debian package. First remove the
+per-user application (screenshots and settings are preserved), then build and
+install the package:
 
 ```bash
-gapplication action ai.thinkany.snapok.linux.v0_1_3 quit || true
+cd /home/mdpi/workspace/snapok
+./linux/uninstall-user.sh
 make linux-test
 make linux-package
-pkexec apt install --reinstall -y "$PWD/dist/snapok_0.1.3_amd64.deb"
-snapok
+pkexec apt install -y "$PWD/dist/snapok_0.1.4_amd64.deb"
+/usr/bin/snapok
 ```
 
-For a new version, change `__version__` in
-`linux/snapok_linux/__init__.py`, then build the Debian package with the same
-version value:
+`make linux-package` reads the version from `snapok_linux/__init__.py`, so the
+package filename and application ID stay in sync. The Debian package stops any
+running `/usr/lib/snapok` process before upgrade or removal. Its desktop entry
+uses the absolute `/usr/bin/snapok` path, so an old executable elsewhere in
+`PATH` cannot intercept it.
+
+If you rebuild the same version, use `--reinstall` so APT replaces every file:
 
 ```bash
-SNAPOK_VERSION=0.1.4
-VERSION="$SNAPOK_VERSION" ./linux/build-deb.sh
-pkexec apt install -y "$PWD/dist/snapok_${SNAPOK_VERSION}_amd64.deb"
-snapok
+make linux-test
+make linux-package
+pkexec apt install --reinstall -y "$PWD/dist/snapok_0.1.4_amd64.deb"
+/usr/bin/snapok
 ```
 
-Use a higher version for feature updates. Versioned application IDs let a new
-release close an older running Snapok instance instead of activating stale
-code.
+To inspect or manually stop a background instance:
+
+```bash
+ps -eo pid,args | grep '[s]napok_linux.py'
+pkill -TERM -f '^python3 /usr/lib/snapok/snapok_linux\.py($| )'
+pkill -TERM -f "^python3 $HOME/.local/bin/snapok( |$)"
+```
+
+For a new release, change only `__version__` in
+`linux/snapok_linux/__init__.py`; do not pass a separate version unless you are
+deliberately building a prerelease. Versioned application IDs let a new release
+close an older running Snapok instance instead of activating stale code.
 
 ## Optional features
 

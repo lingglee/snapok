@@ -5,7 +5,6 @@ from unittest.mock import call, patch
 
 from PIL import Image, ImageDraw
 
-from snapok_linux.ai import annotations_from_plan, parse_plan
 from snapok_linux.app import APPLICATION_ID, LEGACY_APPLICATION_ID, stop_older_instances
 from snapok_linux.editor import MAX_ZOOM, MIN_ZOOM, zoom_after_scroll
 from snapok_linux.history import HistoryStore, Settings
@@ -32,11 +31,45 @@ class CoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = HistoryStore(Path(directory))
             document = store.create(base)
+            document.category = "Work"
+            document.tags = ["release", "important"]
             document.annotations = annotations
             store.save(document, rendered)
             loaded = store.list()[0]
             self.assertEqual(len(loaded.annotations), len(annotations))
+            self.assertEqual(loaded.category, "Work")
+            self.assertEqual(loaded.tags, ["release", "important"])
+            self.assertEqual(store.list(category="Work")[0].identifier, loaded.identifier)
+            self.assertEqual(store.list(query="important")[0].identifier, loaded.identifier)
             self.assertTrue(store.thumbnail_path(loaded).exists())
+
+    def test_library_metadata_and_trash_management(self):
+        base = Image.new("RGB", (80, 50), "white")
+        rendered = Image.new("RGB", (80, 50), "#123456")
+        with tempfile.TemporaryDirectory() as directory:
+            store = HistoryStore(Path(directory))
+            document = store.create(base)
+            store.save(document, rendered)
+            rendered_before = store.rendered_path(document).read_bytes()
+
+            document.title = "Release notes"
+            document.category = "Work"
+            document.tags = ["release", "docs"]
+            store.update_metadata(document)
+            loaded = store.list(query="docs", category="Work")[0]
+            self.assertEqual(loaded.title, "Release notes")
+            self.assertEqual(store.rendered_path(loaded).read_bytes(), rendered_before)
+
+            store.trash(loaded)
+            self.assertEqual(store.list(), [])
+            trashed = store.list_trashed()[0]
+            self.assertTrue(trashed.trashed)
+            store.restore(trashed)
+            self.assertFalse(trashed.trashed)
+            self.assertEqual(store.list()[0].title, "Release notes")
+            store.trash(trashed)
+            store.delete(trashed)
+            self.assertEqual(store.list_trashed(), [])
 
     def test_frame(self):
         image = Image.new("RGBA", (320, 180), "white")
@@ -84,10 +117,29 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(stitcher.add(frames[2]))
         self.assertAlmostEqual(stitcher.result.height, 700, delta=3)
 
-    def test_agent_plan_validation(self):
-        plan = parse_plan('{"message":"ok","actions":[{"tool":"mosaic","points":[[-2,5],[1200,500]]}]}')
-        annotations = annotations_from_plan(plan, 800, 400)
-        self.assertEqual(annotations[0].points, [(0.0, 5.0), (800.0, 400.0)])
+    def test_rejected_scroll_frame_does_not_skip_to_the_tail(self):
+        tall = Image.new("RGB", (360, 900), "white")
+        draw = ImageDraw.Draw(tall)
+        for y in range(0, 900, 29):
+            draw.rectangle((8, y + 1, 352, y + 20), fill=((y * 7) % 255, (y * 11) % 255, (y * 13) % 255))
+            draw.text((16, y + 3), f"content {y}", fill="black")
+        first = tall.crop((0, 0, 360, 360))
+        next_good = tall.crop((0, 120, 360, 480))
+        unrelated = Image.new("RGB", first.size)
+        unrelated.putdata([
+            ((x * 17 + y * 31) % 256, (x * 43 + y * 7) % 256, (x * 5 + y * 61) % 256)
+            for y in range(unrelated.height)
+            for x in range(unrelated.width)
+        ])
+        stitcher = ScrollStitcher(first)
+
+        self.assertFalse(stitcher.add(unrelated))
+        self.assertTrue(stitcher.alignment_lost)
+        self.assertEqual(stitcher.frames, 1)
+        self.assertEqual(stitcher.last.tobytes(), first.tobytes())
+        self.assertTrue(stitcher.add(next_good))
+        self.assertFalse(stitcher.alignment_lost)
+        self.assertAlmostEqual(stitcher.result.height, 480, delta=3)
 
     def test_old_default_hotkey_is_migrated(self):
         import json
@@ -99,11 +151,18 @@ class CoreTests(unittest.TestCase):
                 folder = Path(directory) / "snapok"
                 folder.mkdir()
                 (folder / "settings.json").write_text(
-                    json.dumps({"hotkey": "Ctrl+Super+A"}), encoding="utf-8"
+                    json.dumps({
+                        "hotkey": "Ctrl+Super+A",
+                        "ai_base_url": "https://example.invalid/v1",
+                        "ai_model": "old-agent-model",
+                    }),
+                    encoding="utf-8",
                 )
                 settings = Settings()
                 self.assertEqual(settings["hotkey"], "Ctrl+Shift+P")
                 self.assertEqual(settings["hotkey_schema"], 2)
+                self.assertNotIn("ai_base_url", settings.values)
+                self.assertNotIn("ai_model", settings.values)
             finally:
                 if previous is None:
                     os.environ.pop("XDG_CONFIG_HOME", None)
@@ -115,6 +174,9 @@ class CoreTests(unittest.TestCase):
         key, modifiers = hotkey._parse("Ctrl+Shift+P")
         self.assertEqual(key, "P")
         self.assertEqual(modifiers, hotkey.CONTROL | hotkey.SHIFT)
+        key, modifiers = hotkey._parse(Settings.defaults["scroll_hotkey"])
+        self.assertEqual(key, "O")
+        self.assertEqual(modifiers, hotkey.CONTROL | hotkey.SHIFT)
 
     def test_editor_wheel_zoom_is_bounded(self):
         self.assertGreater(zoom_after_scroll(1.0, Gdk.ScrollDirection.UP), 1.0)
@@ -123,7 +185,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(zoom_after_scroll(MIN_ZOOM, Gdk.ScrollDirection.DOWN), MIN_ZOOM)
 
     def test_new_version_stops_legacy_single_instance(self):
-        self.assertEqual(APPLICATION_ID, "ai.thinkany.snapok.linux.v0_1_3")
+        self.assertEqual(APPLICATION_ID, "ai.thinkany.snapok.linux.v0_1_4")
         with patch("snapok_linux.app._running_snapok_app_ids", return_value=set()), \
              patch("snapok_linux.app.time.sleep"), \
              patch("snapok_linux.app.subprocess.run") as run:

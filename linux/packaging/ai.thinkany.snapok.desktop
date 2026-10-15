@@ -2,9 +2,10 @@
 Type=Application
 Name=Snapok
 Comment=Capture, annotate, and organize screenshots
-Exec=snapok
+Exec=/usr/bin/snapok
 Icon=ai.thinkany.snapok
 Terminal=false
 Categories=Graphics;Utility;
 Keywords=screenshot;capture;annotation;image;
 StartupNotify=true
+StartupWMClass=Snapok_linux.py

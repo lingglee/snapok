@@ -37,13 +37,12 @@ class Settings:
         "auto_save": True,
         "retention_days": 30,
         "hotkey": "Ctrl+Shift+P",
+        "scroll_hotkey": "Ctrl+Shift+O",
         "hotkey_schema": 2,
         "last_tool": "rectangle",
         "stroke_color": "#ec4899",
         "stroke_width": 4,
         "mosaic_style": "pixelate",
-        "ai_base_url": "https://api.openai.com/v1",
-        "ai_model": "gpt-4.1-mini",
     }
 
     def __init__(self) -> None:
@@ -55,10 +54,17 @@ class Settings:
             self.values.update(loaded)
         except (OSError, ValueError, TypeError):
             pass
+        removed_ai_settings = False
+        for key in ("ai_base_url", "ai_model"):
+            if key in self.values:
+                self.values.pop(key)
+                removed_ai_settings = True
         if int(loaded.get("hotkey_schema", 1)) < 2:
             if self.values.get("hotkey") == "Ctrl+Super+A":
                 self.values["hotkey"] = "Ctrl+Shift+P"
             self.values["hotkey_schema"] = 2
+            self.save()
+        elif removed_ai_settings:
             self.save()
 
     def __getitem__(self, key):
@@ -79,6 +85,10 @@ class HistoryStore:
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or data_root()
         self.root.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def trash_root(self) -> Path:
+        return self.root / ".trash"
 
     def create(self, image: Image.Image, title: str = "Screenshot", transient: bool = False) -> Document:
         now = dt.datetime.now(dt.timezone.utc)
@@ -104,10 +114,7 @@ class HistoryStore:
         if document.image_path.resolve() != (folder / "original.png").resolve():
             shutil.copy2(document.image_path, folder / "original.png")
             document.image_path = folder / "original.png"
-        (folder / "meta.json").write_text(
-            json.dumps(document.metadata(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        self._write_metadata(folder, document)
         source = rendered or Image.open(document.image_path)
         source.convert("RGB").save(folder / "rendered.png", "PNG")
         thumbnail = source.copy()
@@ -117,7 +124,23 @@ class HistoryStore:
         if old_folder and old_folder != folder and old_folder.exists():
             shutil.rmtree(old_folder)
 
-    def list(self, query: str = "") -> list[Document]:
+    def _write_metadata(self, folder: Path, document: Document) -> None:
+        path = folder / "meta.json"
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(document.metadata(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
+    def update_metadata(self, document: Document) -> None:
+        """Save title/category/tags without re-rendering or replacing the edited image."""
+        folder = document.image_path.parent
+        if folder.parent not in {self.root, self.trash_root}:
+            raise ValueError("Document is outside the Snapok library")
+        self._write_metadata(folder, document)
+
+    def list(self, query: str = "", category: str = "") -> list[Document]:
         query = query.casefold().strip()
         documents: list[Document] = []
         for metadata in self.root.glob("*/meta.json"):
@@ -125,7 +148,31 @@ class HistoryStore:
                 item = Document.load(metadata.parent)
             except (OSError, ValueError, TypeError):
                 continue
-            haystack = f"{item.title} {' '.join(item.tags)}".casefold()
+            haystack = f"{item.title} {item.category} {' '.join(item.tags)}".casefold()
+            category_matches = (
+                not category
+                or (category == "__uncategorized__" and not item.category)
+                or item.category.casefold() == category.casefold()
+            )
+            if category_matches and (not query or query in haystack):
+                documents.append(item)
+        return sorted(documents, key=lambda item: item.created_at, reverse=True)
+
+    def categories(self) -> list[str]:
+        return sorted({item.category for item in self.list() if item.category}, key=str.casefold)
+
+    def list_trashed(self, query: str = "") -> list[Document]:
+        query = query.casefold().strip()
+        documents: list[Document] = []
+        if not self.trash_root.exists():
+            return documents
+        for metadata in self.trash_root.glob("*/meta.json"):
+            try:
+                item = Document.load(metadata.parent)
+            except (OSError, ValueError, TypeError):
+                continue
+            item.trashed = True
+            haystack = f"{item.title} {item.category} {' '.join(item.tags)}".casefold()
             if not query or query in haystack:
                 documents.append(item)
         return sorted(documents, key=lambda item: item.created_at, reverse=True)
@@ -139,9 +186,32 @@ class HistoryStore:
         return thumbnail if thumbnail.exists() else self.rendered_path(document)
 
     def delete(self, document: Document) -> None:
-        folder = self.root / document.identifier
-        if folder.parent == self.root and folder.exists():
+        folder = document.image_path.parent
+        if folder.parent in {self.root, self.trash_root} and folder.exists():
             shutil.rmtree(folder)
+
+    def trash(self, document: Document) -> None:
+        folder = document.image_path.parent
+        if folder.parent != self.root or not folder.exists():
+            return
+        self.trash_root.mkdir(exist_ok=True)
+        destination = self.trash_root / document.identifier
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.move(str(folder), str(destination))
+        document.image_path = destination / "original.png"
+        document.trashed = True
+
+    def restore(self, document: Document) -> None:
+        folder = document.image_path.parent
+        if folder.parent != self.trash_root or not folder.exists():
+            return
+        destination = self.root / document.identifier
+        if destination.exists():
+            raise FileExistsError(f"A library item named {document.identifier} already exists")
+        shutil.move(str(folder), str(destination))
+        document.image_path = destination / "original.png"
+        document.trashed = False
 
     def discard(self, document: Document) -> None:
         if document.transient and document.image_path.parent.exists():

@@ -93,6 +93,18 @@ flowboxchild:selected { background: transparent; }
   padding: 8px;
 }
 .card-title { font-size: 14px; font-weight: 700; color: #26262a; }
+.card-menu-button {
+  min-width: 24px;
+  min-height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: #77777f;
+  font-weight: 800;
+}
+.card-menu-button:hover { background: rgba(30,30,40,.08); color: #242429; }
 .editor-header { background: #f3f3f5; border-bottom: 1px solid #dddddf; }
 .canvas-area { background: #171923; }
 .inspector { background: #f4f4f6; border-left: 1px solid #dcdce1; }

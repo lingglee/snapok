@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import os
-import threading
 from pathlib import Path
 
 from PIL import Image, ImageFilter, ImageOps
@@ -13,7 +12,6 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
 
-from .ai import AIClient, AIError, SecretStore, annotations_from_plan
 from .history import HistoryStore, Settings
 from .images import frame_image, pil_to_pixbuf, render_document
 from .model import Annotation, Document
@@ -430,6 +428,9 @@ class EditorWindow(Gtk.Window):
             button = css(Gtk.Button(label=label), "flat-action")
             button.connect("clicked", callback)
             top.pack_start(button, False, False, 0)
+        text_tools = css(Gtk.Button(label="Text Tools"), "flat-action")
+        text_tools.connect("clicked", self._show_text_menu)
+        top.pack_start(text_tools, False, False, 0)
         root.pack_start(top, False, False, 0)
 
         body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
@@ -512,10 +513,9 @@ class EditorWindow(Gtk.Window):
         self._changed()
         self.canvas.queue_draw()
 
-    def _show_ai_menu(self, button: Gtk.Button) -> None:
+    def _show_text_menu(self, button: Gtk.Button) -> None:
         menu = Gtk.Menu()
         for label, callback in [
-            ("Ask Snapok Agent…", self.ask_agent),
             ("Recognize Text", lambda *_: self.run_ocr()),
             ("Redact Sensitive Text", lambda *_: self.auto_redact()),
         ]:
@@ -714,92 +714,6 @@ class EditorWindow(Gtk.Window):
         window = PinnedImageWindow(self.rendered())
         window.connect("destroy", lambda item: self.pinned.remove(item) if item in self.pinned else None)
         self.pinned.append(window)
-
-    def ask_agent(self, *_args) -> None:
-        dialog = Gtk.Dialog(title="Ask Snapok Agent", transient_for=self, modal=True)
-        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=14)
-        hint = Gtk.Label(
-            label="Describe what to redact, mark, label, translate, or inspect. The model receives the current screenshot.",
-            xalign=0,
-        )
-        hint.set_line_wrap(True)
-        prompt = Gtk.TextView()
-        prompt.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        prompt.set_size_request(560, 110)
-        prompt.get_buffer().set_text("Redact sensitive information in this screenshot")
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        scroll.add(prompt)
-        result = Gtk.Label(xalign=0)
-        result.set_line_wrap(True)
-        spinner = Gtk.Spinner()
-        send = Gtk.Button(label="Run Agent")
-        send.get_style_context().add_class("suggested-action")
-        row = Gtk.Box(spacing=8)
-        row.pack_start(spinner, False, False, 0)
-        row.pack_start(result, True, True, 0)
-        row.pack_end(send, False, False, 0)
-        content.pack_start(hint, False, False, 0)
-        content.pack_start(scroll, True, True, 0)
-        content.pack_start(row, False, False, 0)
-        dialog.get_content_area().add(content)
-        state = {"closed": False}
-
-        def completed(plan=None, annotations=None, error=None) -> bool:
-            if state["closed"]:
-                return False
-            spinner.stop()
-            send.set_sensitive(True)
-            if error:
-                result.set_text(str(error))
-                result.get_style_context().add_class("error")
-                return False
-            result.set_text(str(plan.get("message", "Done")))
-            if annotations:
-                self.canvas.checkpoint()
-                previous_step = max(
-                    (item.number for item in self.document.annotations if item.kind == "step"), default=0
-                )
-                for item in annotations:
-                    if item.kind == "step":
-                        item.number += previous_step
-                self.document.annotations.extend(annotations)
-                self._changed()
-                self.canvas.queue_draw()
-            return False
-
-        def request_agent(*_clicked) -> None:
-            start, end = prompt.get_buffer().get_bounds()
-            instruction = prompt.get_buffer().get_text(start, end, True).strip()
-            if not instruction:
-                result.set_text("Enter a request first.")
-                return
-            send.set_sensitive(False)
-            spinner.start()
-            result.set_text("Analyzing the screenshot…")
-
-            def worker() -> None:
-                try:
-                    client = AIClient(
-                        str(self.settings["ai_base_url"]),
-                        str(self.settings["ai_model"]),
-                        SecretStore.get(),
-                    )
-                    image = self.rendered(styled=False)
-                    plan = client.request(image, instruction)
-                    annotations = annotations_from_plan(plan, image.width, image.height)
-                    GLib.idle_add(completed, plan, annotations, None)
-                except Exception as error:
-                    GLib.idle_add(completed, None, None, error)
-
-            threading.Thread(target=worker, name="snapok-agent", daemon=True).start()
-
-        send.connect("clicked", request_agent)
-        dialog.show_all()
-        dialog.run()
-        state["closed"] = True
-        dialog.destroy()
 
     def export(self, *_args) -> None:
         dialog = Gtk.FileChooserDialog(
