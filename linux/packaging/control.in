@@ -1,0 +1,12 @@
+Package: snapok
+Version: @VERSION@
+Section: graphics
+Priority: optional
+Architecture: @ARCH@
+Maintainer: ThinkAny <support@snapok.app>
+Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-3.0, python3-pil, python3-numpy, python3-opencv, libsecret-tools
+Recommends: tesseract-ocr, xdg-desktop-portal
+Description: Screenshot capture, annotation, and organization for Ubuntu
+ Snapok captures screen regions, annotates and frames images, creates scrolling
+ screenshots on X11, keeps an editable history, and supports OCR and configurable
+ OpenAI-compatible image assistance.

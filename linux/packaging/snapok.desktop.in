@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Snapok
+Comment=Capture, annotate, and organize screenshots
+Exec=@EXEC@
+Icon=@ICON@
+Terminal=false
+Categories=Graphics;Utility;
+Keywords=screenshot;capture;annotation;image;
+StartupNotify=true

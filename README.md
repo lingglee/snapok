@@ -3,17 +3,18 @@
 </p>
 
 <h1 align="center">Snapok</h1>
-<p align="center">Capture, annotate, and frame screenshots on macOS — and ask Snapok Agent to redact, mark up, or translate them.</p>
+<p align="center">Capture, annotate, and frame screenshots on macOS and Ubuntu — and ask Snapok Agent to redact, mark up, or translate them.</p>
 <p align="center"><a href="https://snapok.app">snapok.app</a> · <a href="https://github.com/thinkany-ai/snapok/issues">Report an issue</a></p>
 
 [![macOS packages](https://github.com/thinkany-ai/snapok/actions/workflows/macos.yml/badge.svg?branch=dev)](https://github.com/thinkany-ai/snapok/actions/workflows/macos.yml)
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black)
+![Ubuntu 22.04+](https://img.shields.io/badge/Ubuntu-22.04%2B-E95420)
 ![Swift 6](https://img.shields.io/badge/Swift-6-orange)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 
 ![Snapok Agent redacting the avatars, names, and phone number in a chat screenshot](docs/snapok-agent.webp)
 
-Snapok is a native screenshot utility built with Swift and AppKit. Its main window is a library of your past screenshots. Close that window to hide the Dock icon; Snapok stays in the menu bar, and the global hotkey keeps working.
+Snapok is a native screenshot utility. The macOS application is built with Swift and AppKit; the Ubuntu port is built with GTK and Python and lives in [`linux/`](linux/README.md). Its main window is a library of your past screenshots, while a global shortcut keeps capture close at hand.
 
 > Early development: builds from `dev` are previews, not stable releases. The app follows the system language (English or Simplified Chinese) by default; Settings → General → Language can pin either one (applies immediately).
 
@@ -52,6 +53,58 @@ curl -fsSL https://cdn.snapok.app/install.sh | bash
 ```
 
 Or download **https://cdn.snapok.app/Snapok.dmg**, open it, and drag **Snapok.app** to **Applications**. `SNAPOK_CHANNEL=dev` makes the script install Snapok Dev instead; `SNAPOK_INSTALL_DIR` changes the destination.
+
+### Ubuntu 22.04+
+
+The Ubuntu port is currently a source preview. It supports X11 region and scrolling capture, Wayland region capture through the secure desktop portal, annotations, mosaic/blur redaction, editable history, framing, pinned images, OCR, sensitive-text redaction, and an OpenAI-compatible image Agent.
+
+```bash
+sudo apt install python3-gi gir1.2-gtk-3.0 python3-pil python3-numpy python3-opencv libsecret-tools
+./linux/snapok
+
+# Optional OCR and automatic sensitive-text redaction
+sudo apt install tesseract-ocr
+```
+
+Install for the current user with `./linux/install.sh`, or build an installable `.deb` with `make linux-package`. On X11 the capture shortcut defaults to `Ctrl+Shift+P`. Wayland capture works through `xdg-desktop-portal`; continuous scrolling capture is limited to X11 because Wayland deliberately prevents silent repeated screen capture.
+
+#### Build and install the Ubuntu package
+
+From the repository root, run the tests and build the current package:
+
+```bash
+cd /home/mdpi/workspace/snapok
+make linux-test
+make linux-package
+```
+
+The current build produces `dist/snapok_0.1.3_amd64.deb`. Install it and start Snapok with:
+
+```bash
+pkexec apt install -y "$PWD/dist/snapok_0.1.3_amd64.deb"
+snapok
+```
+
+To rebuild and reinstall the same version, first close that version's running instance and force the package reinstall:
+
+```bash
+gapplication action ai.thinkany.snapok.linux.v0_1_3 quit || true
+make linux-test
+make linux-package
+pkexec apt install --reinstall -y "$PWD/dist/snapok_0.1.3_amd64.deb"
+snapok
+```
+
+For a new release, update `__version__` in `linux/snapok_linux/__init__.py`, then pass the same version to the package builder. For example:
+
+```bash
+SNAPOK_VERSION=0.1.4
+VERSION="$SNAPOK_VERSION" ./linux/build-deb.sh
+pkexec apt install -y "$PWD/dist/snapok_${SNAPOK_VERSION}_amd64.deb"
+snapok
+```
+
+Incrementing the version is recommended for feature updates because the newly launched version automatically closes older Snapok instances. More Ubuntu-specific details are in [`linux/README.md`](linux/README.md).
 
 ## Install a development build
 
@@ -171,7 +224,7 @@ The translated image opens in a separate editor. Select a text block to edit its
 
 Image inputs use the screenshot with its current annotations, so anything already masked stays masked. Automatic naming never uses credits; it sends the screenshot only to your own model.
 
-## Build from source
+## Build the macOS app from source
 
 Requires macOS 14+, Swift 6+, and Xcode Command Line Tools or Xcode. There are no third-party package dependencies. CI uses the `macos-26` runner.
 
